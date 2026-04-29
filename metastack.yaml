@@ -1,0 +1,25 @@
+mcp_binary: /home/andy/dev/zellij-mcp/target/debug/zellij-mcp
+session: main
+startup_delay: 0.2
+poll_interval: 0.2
+timeout: 10
+kill_on_done: true
+providers:
+  anthropic:
+    command: [sh]
+    prompt_mode: shell
+    capacity: 1
+    refill_per_sec: 10
+  openai:
+    command: [sh]
+    prompt_mode: shell
+    capacity: 1
+    refill_per_sec: 10
+tasks:
+  - name: A
+    provider: anthropic
+    prompt: echo hello
+  - name: B
+    depends-on: [A]
+    provider: openai
+    prompt: echo world
