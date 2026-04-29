@@ -98,10 +98,18 @@ async fn orchestrate(config: Arc<Config>, client: Arc<McpClient>, base: PathBuf)
         }
         if let Some(done) = joins.join_next().await {
             let (name, result) = done.context("task join failed")?;
+            write_artifact(&name, &result.output);
             results.insert(name, result);
         }
     }
     Ok(results)
+}
+
+fn write_artifact(name: &str, output: &str) {
+    let path = format!("/tmp/metastack-review-{name}.txt");
+    if let Err(e) = fs::write(&path, output) {
+        eprintln!("warning: failed to write artifact {path}: {e}");
+    }
 }
 
 async fn run_task(
@@ -137,18 +145,20 @@ async fn run_task_inner(
     let mut args = json!({"cwd": cwd, "command": provider.command, "name": format!("ms-{safe}"), "floating": config.floating, "direction": config.direction});
     add_opt(&mut args, "session", config.session.clone());
     add_opt(&mut args, "keep_focus_on", env::var("ZELLIJ_PANE_ID").ok());
-    let pane_id = client.call_tool("spawn-pane", args).await?
+    let pane_id = tool_data(&client.call_tool("spawn-pane", args).await?)?
         .get("pane_id").and_then(Value::as_str).context("spawn-pane did not return pane_id")?.to_string();
 
     let mut output = String::new();
     let mut status = "timeout".to_string();
     let work = async {
         sleep(Duration::from_secs_f64(config.startup_delay)).await;
-        client.call_tool("send-text", json!({"pane_id": pane_id, "text": prompt, "submit": true})).await?;
+        let mut send_args = json!({"pane_id": pane_id, "text": prompt, "submit": true});
+        add_opt(&mut send_args, "session", config.session.clone());
+        tool_data(&client.call_tool("send-text", send_args).await?)?;
         loop {
             let mut read_args = json!({"pane_id": pane_id, "full": true});
             add_opt(&mut read_args, "session", config.session.clone());
-            output = client.call_tool("read-pane", read_args).await?
+            output = tool_data(&client.call_tool("read-pane", read_args).await?)?
                 .get("text").and_then(Value::as_str).unwrap_or("").to_string();
             if let Some(code) = exit_code(&output, &sentinel) {
                 status = if code == "0" { "done" } else { "failed" }.into();
@@ -165,13 +175,24 @@ async fn run_task_inner(
     if config.kill_on_done {
         let mut args = json!({"pane_id": pane_id});
         add_opt(&mut args, "session", config.session.clone());
-        let _ = client.call_tool("kill-pane", args).await;
+        let _ = client.call_tool("kill-pane", args).await.and_then(|r| tool_data(&r).map(|_| ()));
     }
     Ok(TaskResult {
         status: if error.is_some() { "failed".into() } else { status },
         provider: task.provider.clone(), pane_id, output, error,
         elapsed: started.elapsed().as_secs_f64(),
     })
+}
+
+fn tool_data(result: &Value) -> Result<&Value> {
+    if result.get("isError").and_then(Value::as_bool).unwrap_or(false) {
+        let text: String = result.get("content")
+            .and_then(Value::as_array)
+            .map(|arr| arr.iter().filter_map(|v| v.get("text").and_then(Value::as_str)).collect::<Vec<_>>().join(" "))
+            .unwrap_or_default();
+        bail!("tool error: {}", if text.is_empty() { "unknown error" } else { &text });
+    }
+    Ok(result.get("structuredContent").unwrap_or(result))
 }
 
 fn validate(config: &Config) -> Result<()> {
