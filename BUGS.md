@@ -4,15 +4,15 @@ Test date: 2026-04-29
 Test: 3 parallel codex review tasks via sh-wrapper pattern
 Result: 2/3 tasks completed (done), 1/3 failed. Review outputs lost due to kill_on_done.
 
-## Bug 1: Session hardcoding ignores current session
+## Bug 1: Session hardcoding ignores current session — FIXED in src/main.rs
 
 **What happened:** `session: main` was hardcoded in `metastack.yaml`. Panes spawned in the user's active zellij session (which happened to be named `main`), cluttering their workspace. If the user were in a different session, metastack would either fail or spawn panes in the wrong session.
 
-**Root cause:** The YAML config requires an explicit `session` field. There's no auto-detection of `ZELLIJ` env var.
+**Root cause:** zellij sets `ZELLIJ=0` as an in-session marker, not as the session name. Auto-detection must read `ZELLIJ_SESSION_NAME` when the YAML config omits `session`.
 
-**Fix (v0.1):** Default `session` to `std::env::var("ZELLIJ").ok()` (the session name inherited from the parent zellij process). Only fall back to YAML-configured session if not running inside zellij.
+**Fix (v0.1):** Keep an explicit YAML `session` as an override. Otherwise default `session` to `std::env::var("ZELLIJ_SESSION_NAME").ok()`, ignoring the `ZELLIJ` marker.
 
-## Bug 2: Agent-as-direct-provider pattern is fragile
+## Bug 2: Agent-as-direct-provider pattern is fragile — VALIDATOR WARNING added in src/main.rs
 
 **What happened:** Initial attempt used `command: [codex, exec, ...]` with `prompt_mode: instruction`. Codex exec needs the prompt at invocation time (positional arg or piped stdin), not delivered via `send-text` after spawn. The panes appeared empty and codex exited immediately or hung without processing the sent text.
 
@@ -42,13 +42,23 @@ Result: 2/3 tasks completed (done), 1/3 failed. Review outputs lost due to kill_
 2. **Medium-term:** After spawning the first aux pane with `direction: right`, capture its pane_id, then for subsequent aux panes: `focus-pane` the previous aux pane, `spawn-pane` with `direction: down`, then `focus-pane` back to main. This requires metastack to track the "last aux pane" state.
 3. **Resize:** Add a `resize-pane` tool to zellij-mcp or call `zellij action resize` directly.
 
-## Bug 5: No task output persistence
+## Bug 5: No task output persistence — FIXED in src/main.rs
 
 **What happened:** `kill_on_done: true` closed all 3 review panes immediately after task completion. The actual codex review text (the valuable output) was lost. Metastack only prints a status table, not the full output.
 
 **Root cause:** TaskResult contains `output: String` but `print_table` doesn't display it. There's no log file, no artifact directory, no persistence.
 
-**Fix (v0.1):** Add `--output-dir` CLI arg. Write each task's full output to `{output_dir}/{task_name}.txt` on completion. Include a `--show-output` flag for the status table to optionally print truncated output.
+**Fix (v0.1):** Second positional CLI arg becomes output dir (default `/tmp`). Artifacts written to `{output_dir}/metastack-{task_name}.txt`.
+
+---
+
+## Bug 6 (P0): read-pane → TaskResult.output pipeline empty even when sentinel detected — FIXED in src/main.rs
+
+**What happened:** `write_artifact` fired but wrote 0 bytes. The `output` field in `TaskResult` was empty string even though the sentinel was detected and task status was "done".
+
+**Root cause:** `read-pane` returns standard MCP tool result format `{"content": [{"type": "text", "text": "..."}]}` but metastack was reading `.get("text")` directly (expecting `{"text": "..."}` format). The `tool_data` helper returned the raw result for non-errors, so `.get("text")` returned `None` and `unwrap_or("")` produced empty string.
+
+**Fix:** Added `extract_text()` helper that tries `.text` first, then falls back to `content[].text` array extraction.
 
 ---
 

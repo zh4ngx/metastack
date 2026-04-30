@@ -1,0 +1,27 @@
+# Example smoke test config — NOT YET FUNCTIONAL.
+# TODO: replace `command: [sh]` below with a real provider command
+# (e.g. `[codex, exec, --dangerously-bypass-approvals-and-sandbox, -m, gpt-5.5]`)
+# and rewrite the `prompt` fields as actual shell-runnable invocations.
+# Current sh provider treats natural-language prompts as shell syntax and fails.
+# See BUGS.md and /tmp/metastack-v1-report.md for context.
+mcp_binary: /home/andy/dev/zellij-mcp/target/debug/zellij-mcp
+session: mz
+direction: down
+target_pane_id: terminal_0
+startup_delay: 0.2
+poll_interval: 0.2
+timeout: 10
+kill_on_done: true
+providers:
+  codex:
+    command: [sh]
+    prompt_mode: shell
+    capacity: 2
+    refill_per_sec: 1
+tasks:
+  - name: review-main
+    provider: codex
+    prompt: Review src/main.rs in ~/dev/metastack-rs for Rust idioms and error handling. Keep it brief (3-5 bullets).
+  - name: review-mcp
+    provider: codex
+    prompt: Review src/mcp.rs in ~/dev/metastack-rs for async patterns and JSON-RPC correctness. Keep it brief (3-5 bullets).
