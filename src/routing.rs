@@ -901,6 +901,10 @@ fn default_codex_sandbox_policy() -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio::{
+        io::{AsyncReadExt, AsyncWriteExt},
+        net::{TcpListener, TcpStream},
+    };
 
     struct FakeBackend;
 
@@ -1114,6 +1118,52 @@ routes:
         );
     }
 
+    #[tokio::test]
+    async fn opencode_backend_posts_prompt_async_against_fake_server() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let request = read_http_request(&mut stream).await;
+            assert!(request.starts_with("GET /session "));
+
+            let body = serde_json::to_string(&json!([
+                {
+                    "id": "ses-old",
+                    "directory": "/home/andy/nixos",
+                    "time": {"updated": 1}
+                },
+                {
+                    "id": "ses-new",
+                    "directory": "/home/andy/nixos",
+                    "time": {"updated": 2}
+                }
+            ]))
+            .unwrap();
+            write_http_response(&mut stream, 200, Some(&body)).await;
+
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let request = read_http_request(&mut stream).await;
+            assert!(request.starts_with("POST /session/ses-new/prompt_async "));
+            assert!(request.contains(r#""text":"hello fake opencode""#));
+            write_http_response(&mut stream, 204, None).await;
+        });
+
+        let backend = OpenCodeBackend::new(format!("http://{addr}"));
+        let mut envelope = envelope();
+        envelope.backend = BackendKind::OpenCode;
+        envelope.target = "vault-oc".to_string();
+        envelope.message = "hello fake opencode".to_string();
+        envelope.cwd = Some("/home/andy/nixos".to_string());
+
+        let receipt = backend.inject(envelope).await.unwrap();
+
+        assert_eq!(receipt.backend, BackendKind::OpenCode);
+        assert_eq!(receipt.status, InjectionStatus::Queued);
+        assert_eq!(receipt.session_id.as_deref(), Some("ses-new"));
+        server.await.unwrap();
+    }
+
     #[test]
     fn builds_codex_json_rpc_payloads() {
         let backend = CodexBackend::new("ws://127.0.0.1:4107");
@@ -1214,6 +1264,97 @@ routes:
         );
     }
 
+    #[tokio::test]
+    async fn codex_backend_completes_turn_against_fake_server() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+
+            let request = next_ws_json(&mut ws).await.unwrap();
+            assert_eq!(request["method"], "initialize");
+            assert_eq!(request["id"], 1);
+            send_ws_json(&mut ws, json!({"jsonrpc": "2.0", "id": 1, "result": {}})).await;
+
+            let notification = next_ws_json(&mut ws).await.unwrap();
+            assert_eq!(notification["method"], "initialized");
+
+            let request = next_ws_json(&mut ws).await.unwrap();
+            assert_eq!(request["method"], "thread/list");
+            assert_eq!(request["id"], 2);
+            assert_eq!(request["params"]["cwd"], "/home/andy/nixos");
+            send_ws_json(
+                &mut ws,
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": 2,
+                    "result": {
+                        "data": [
+                            {
+                                "id": "thread-1",
+                                "cwd": "/home/andy/nixos",
+                                "source": "cli",
+                                "status": {"type": "active"}
+                            }
+                        ]
+                    }
+                }),
+            )
+            .await;
+
+            let request = next_ws_json(&mut ws).await.unwrap();
+            assert_eq!(request["method"], "thread/resume");
+            assert_eq!(request["id"], 3);
+            assert_eq!(request["params"]["threadId"], "thread-1");
+            send_ws_json(&mut ws, json!({"jsonrpc": "2.0", "id": 3, "result": {}})).await;
+
+            let request = next_ws_json(&mut ws).await.unwrap();
+            assert_eq!(request["method"], "turn/start");
+            assert_eq!(request["id"], 4);
+            assert_eq!(request["params"]["threadId"], "thread-1");
+            assert_eq!(request["params"]["input"][0]["text"], "status update");
+            send_ws_json(
+                &mut ws,
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": 4,
+                    "result": {
+                        "turn": {
+                            "id": "turn-1",
+                            "status": "inProgress"
+                        }
+                    }
+                }),
+            )
+            .await;
+            send_ws_json(
+                &mut ws,
+                json!({
+                    "jsonrpc": "2.0",
+                    "method": "turn/completed",
+                    "params": {
+                        "threadId": "thread-1",
+                        "turn": {
+                            "id": "turn-1",
+                            "status": "completed"
+                        }
+                    }
+                }),
+            )
+            .await;
+        });
+
+        let mut backend = CodexBackend::new(format!("ws://{addr}"));
+        backend.completion_timeout = Duration::from_secs(5);
+        let receipt = backend.inject(envelope()).await.unwrap();
+
+        assert_eq!(receipt.backend, BackendKind::Codex);
+        assert_eq!(receipt.status, InjectionStatus::Completed);
+        assert_eq!(receipt.thread_id.as_deref(), Some("thread-1"));
+        server.await.unwrap();
+    }
+
     #[test]
     fn falls_back_to_newest_cli_codex_thread() {
         let response = json!({
@@ -1262,5 +1403,55 @@ routes:
                 "submit_strategy": "text_then_enter"
             })
         );
+    }
+
+    async fn read_http_request(stream: &mut TcpStream) -> String {
+        let mut buf = Vec::new();
+        let mut chunk = [0; 1024];
+        loop {
+            let n = stream.read(&mut chunk).await.unwrap();
+            assert!(n > 0, "HTTP request ended before headers were complete");
+            buf.extend_from_slice(&chunk[..n]);
+
+            let Some(header_end) = buf.windows(4).position(|window| window == b"\r\n\r\n") else {
+                continue;
+            };
+            let headers = String::from_utf8_lossy(&buf[..header_end]);
+            let content_len = headers
+                .lines()
+                .find_map(|line| {
+                    let lower = line.to_ascii_lowercase();
+                    lower
+                        .strip_prefix("content-length:")
+                        .and_then(|value| value.trim().parse::<usize>().ok())
+                })
+                .unwrap_or(0);
+            if buf.len() >= header_end + 4 + content_len {
+                return String::from_utf8(buf).unwrap();
+            }
+        }
+    }
+
+    async fn write_http_response(stream: &mut TcpStream, status: u16, body: Option<&str>) {
+        let reason = match status {
+            200 => "OK",
+            204 => "No Content",
+            _ => "OK",
+        };
+        let body = body.unwrap_or("");
+        let response = format!(
+            "HTTP/1.1 {status} {reason}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        stream.write_all(response.as_bytes()).await.unwrap();
+    }
+
+    async fn send_ws_json<S>(ws: &mut S, value: Value)
+    where
+        S: futures_util::Sink<Message, Error = tokio_tungstenite::tungstenite::Error> + Unpin,
+    {
+        ws.send(Message::Text(value.to_string().into()))
+            .await
+            .unwrap();
     }
 }
