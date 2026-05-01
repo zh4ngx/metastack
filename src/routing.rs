@@ -71,10 +71,14 @@ pub struct InjectionReceipt {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum TargetHandle {
     OpenCode {
-        session_id: String,
+        cwd: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        session_id: Option<String>,
     },
     Codex {
-        thread_id: String,
+        cwd: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        thread_id: Option<String>,
     },
     Claude {
         channel: String,
@@ -82,10 +86,27 @@ pub enum TargetHandle {
     Zellij {
         #[serde(default)]
         session: Option<String>,
-        pane_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pane_id: Option<String>,
         #[serde(default)]
         submit_strategy: ZellijSubmitStrategy,
     },
+}
+
+impl TargetHandle {
+    fn apply_to_envelope(&self, envelope: &mut RoutingEnvelope) {
+        match self {
+            Self::OpenCode { cwd, session_id } => {
+                envelope.cwd = Some(cwd.clone());
+                envelope.session_id = session_id.clone();
+            }
+            Self::Codex { cwd, thread_id } => {
+                envelope.cwd = Some(cwd.clone());
+                envelope.thread_id = thread_id.clone();
+            }
+            Self::Claude { .. } | Self::Zellij { .. } => {}
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
@@ -271,9 +292,7 @@ pub struct ResolvedTarget {
     pub name: String,
     pub backend_name: String,
     pub backend: BackendConfig,
-    pub cwd: String,
-    pub session_id: Option<String>,
-    pub thread_id: Option<String>,
+    pub handle: TargetHandle,
 }
 
 #[derive(Clone, Debug)]
@@ -299,13 +318,30 @@ impl TargetRegistry {
             )
         })?;
 
+        let handle = match backend {
+            BackendConfig::OpenCode { .. } => TargetHandle::OpenCode {
+                cwd: agent.cwd.clone(),
+                session_id: agent.session_id.clone(),
+            },
+            BackendConfig::Codex { .. } => TargetHandle::Codex {
+                cwd: agent.cwd.clone(),
+                thread_id: agent.thread_id.clone(),
+            },
+            BackendConfig::Claude { channel } => TargetHandle::Claude {
+                channel: channel.clone(),
+            },
+            BackendConfig::Zellij { session, .. } => TargetHandle::Zellij {
+                session: session.clone(),
+                pane_id: None,
+                submit_strategy: ZellijSubmitStrategy::default(),
+            },
+        };
+
         Ok(ResolvedTarget {
             name: target.to_string(),
             backend_name: agent.backend.clone(),
             backend: backend.clone(),
-            cwd: agent.cwd.clone(),
-            session_id: agent.session_id.clone(),
-            thread_id: agent.thread_id.clone(),
+            handle,
         })
     }
 }
@@ -334,18 +370,19 @@ impl Router {
         origin: String,
     ) -> Result<(RoutingEnvelope, BackendConfig)> {
         let resolved = TargetRegistry::new(self.config.clone()).resolve(target)?;
-        let envelope = RoutingEnvelope {
+        let mut envelope = RoutingEnvelope {
             origin,
             target: target.to_string(),
             backend: resolved.backend.kind(),
             role: MessageRole::User,
             message,
-            cwd: Some(resolved.cwd),
-            session_id: resolved.session_id,
-            thread_id: resolved.thread_id,
+            cwd: None,
+            session_id: None,
+            thread_id: None,
             reply_to: self.config.routes.default_reply_to.clone(),
             correlation_id: Uuid::new_v4().simple().to_string(),
         };
+        resolved.handle.apply_to_envelope(&mut envelope);
 
         Ok((envelope, resolved.backend))
     }
@@ -989,8 +1026,13 @@ agents:
         let target = registry.resolve("nixos-cx").unwrap();
         assert_eq!(target.backend_name, "cx");
         assert_eq!(target.backend.kind(), BackendKind::Codex);
-        assert_eq!(target.cwd, "/home/andy/nixos");
-        assert_eq!(target.thread_id.as_deref(), Some("thread-1"));
+        assert_eq!(
+            target.handle,
+            TargetHandle::Codex {
+                cwd: "/home/andy/nixos".to_string(),
+                thread_id: Some("thread-1".to_string())
+            }
+        );
     }
 
     #[test]
@@ -1391,7 +1433,7 @@ routes:
 
         let handle = TargetHandle::Zellij {
             session: Some("main".to_string()),
-            pane_id: "terminal_0".to_string(),
+            pane_id: Some("terminal_0".to_string()),
             submit_strategy: ZellijSubmitStrategy::TextThenEnter,
         };
         assert_eq!(

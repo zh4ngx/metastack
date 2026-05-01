@@ -28,19 +28,13 @@ Result: 2/3 tasks completed (done), 1/3 failed. Review outputs lost due to kill_
 
 **Fix (v0.1):** Support `direction: down` as a workaround (already tested). For the real fix, see Bug 4.
 
-## Bug 4: No support for intended main/aux column layout
+## Bug 4: Intended main/aux column layout only partially handled
 
-**What happened:** The intended layout is main pane left 2/3, aux/worker panes tiled top-down in the right 1/3 column. Metastack v0 has no mechanism to achieve this because:
-- `spawn-pane` targets the focused pane for splitting
-- There's no `target_pane_id` argument to split a specific pane
-- No pane resize capability after spawn
+**What happened:** The intended layout is main pane left 2/3, aux/worker panes tiled top-down in the right 1/3 column. Original metastack v0 had no mechanism to achieve this because `spawn-pane` targeted the focused pane and there was no `target_pane_id` routing.
 
-**Root cause:** zellij-mcp's `spawn-pane` only supports `direction`, not `target_pane_id`. zellij CLI itself does support `--pane-id` on some commands, but `new-pane` splits relative to focus.
+**Current status:** `target_pane_id` is now wired from global config and per-task config into `spawn-pane`, so pane targeting is partially handled. The remaining gap is layout policy: resizing, tracking the aux column, and deciding whether later worker panes should split the previous worker pane or the original target.
 
-**Fix (v0.1):** Two options:
-1. **Short-term:** Add `spawn-pane` support for `target_pane_id` in zellij-mcp (if zellij CLI supports it, or use `focus-pane` before `new-pane` then restore focus).
-2. **Medium-term:** After spawning the first aux pane with `direction: right`, capture its pane_id, then for subsequent aux panes: `focus-pane` the previous aux pane, `spawn-pane` with `direction: down`, then `focus-pane` back to main. This requires metastack to track the "last aux pane" state.
-3. **Resize:** Add a `resize-pane` tool to zellij-mcp or call `zellij action resize` directly.
+**Remaining fix:** Add an explicit layout policy. After spawning the first aux pane with `direction: right`, capture its pane_id; for subsequent aux panes, split the previous aux pane with `direction: down`, then restore focus to the main pane. Add resize support through zellij-mcp or direct zellij action if fixed proportions matter.
 
 ## Bug 5: No task output persistence — FIXED in src/main.rs
 

@@ -83,15 +83,16 @@ inside backend config or backend state unless they are needed for routing.
 Target discovery should resolve a logical agent name into a typed handle:
 
 ```text
-OpenCode { session_id }
-Codex    { thread_id }
+OpenCode { cwd, session_id? }
+Codex    { cwd, thread_id? }
 Claude   { channel, member }
 Zellij   { session, pane_id, submit_strategy }
 ```
 
-`session_id` and `thread_id` should not remain loose untyped strings once target
-discovery is implemented. The handle type defines which backend may use the
-identifier.
+`session_id` and `thread_id` should not remain loose untyped strings in the
+router. The handle type defines which backend may use the identifier. When a
+concrete id is not configured, the typed handle carries the `cwd` needed for
+backend-specific discovery.
 
 ## Prototype Scope
 
