@@ -183,6 +183,34 @@ pub struct RoutingConfig {
     pub routes: RouteConfig,
 }
 
+impl RoutingConfig {
+    pub fn validate(&self) -> Result<()> {
+        if self.version != 2 {
+            bail!("routing config version {} is not supported", self.version);
+        }
+        if self.backends.is_empty() {
+            bail!("routing config must define at least one backend");
+        }
+        if self.agents.is_empty() {
+            bail!("routing config must define at least one agent");
+        }
+
+        for (name, agent) in &self.agents {
+            if name.trim().is_empty() {
+                bail!("routing agent name cannot be empty");
+            }
+            if agent.cwd.trim().is_empty() {
+                bail!("routing target {name} must define cwd");
+            }
+            if !self.backends.contains_key(&agent.backend) {
+                bail!("target {name} references unknown backend {}", agent.backend);
+            }
+        }
+
+        Ok(())
+    }
+}
+
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct RouteConfig {
     #[serde(default)]
@@ -282,6 +310,77 @@ impl TargetRegistry {
     }
 }
 
+#[derive(Clone, Debug)]
+pub struct Router {
+    config: RoutingConfig,
+}
+
+impl Router {
+    pub fn new(config: RoutingConfig) -> Result<Self> {
+        config.validate()?;
+        Ok(Self { config })
+    }
+
+    pub fn from_yaml(text: &str) -> Result<Self> {
+        let config: RoutingConfig =
+            serde_yml::from_str(text).context("failed to parse routing YAML")?;
+        Self::new(config)
+    }
+
+    pub fn envelope_for(
+        &self,
+        target: &str,
+        message: String,
+        origin: String,
+    ) -> Result<(RoutingEnvelope, BackendConfig)> {
+        let resolved = TargetRegistry::new(self.config.clone()).resolve(target)?;
+        let envelope = RoutingEnvelope {
+            origin,
+            target: target.to_string(),
+            backend: resolved.backend.kind(),
+            role: MessageRole::User,
+            message,
+            cwd: Some(resolved.cwd),
+            session_id: resolved.session_id,
+            thread_id: resolved.thread_id,
+            reply_to: self.config.routes.default_reply_to.clone(),
+            correlation_id: Uuid::new_v4().simple().to_string(),
+        };
+
+        Ok((envelope, resolved.backend))
+    }
+
+    pub async fn inject_text(
+        &self,
+        target: &str,
+        message: String,
+        origin: String,
+    ) -> Result<InjectionReceipt> {
+        let (envelope, backend) = self.envelope_for(target, message, origin)?;
+        Self::dispatch(backend, envelope).await
+    }
+
+    async fn dispatch(
+        backend: BackendConfig,
+        envelope: RoutingEnvelope,
+    ) -> Result<InjectionReceipt> {
+        match &backend {
+            BackendConfig::OpenCode { base_url } => {
+                OpenCodeBackend::new(base_url).inject(envelope).await
+            }
+            BackendConfig::Codex { .. } => {
+                CodexBackend::from_config(&backend)?.inject(envelope).await
+            }
+            BackendConfig::Claude { .. } => {
+                bail!("Claude Huddle backend is documented but not implemented in this prototype")
+            }
+            BackendConfig::Zellij { .. } => {
+                bail!("zellij fallback injection is not implemented in the structured prototype")
+            }
+        }
+    }
+}
+
 pub async fn inject_from_config_path(
     path: &Path,
     target: &str,
@@ -290,43 +389,9 @@ pub async fn inject_from_config_path(
 ) -> Result<InjectionReceipt> {
     let text =
         fs::read_to_string(path).with_context(|| format!("failed to read {}", path.display()))?;
-    let config: RoutingConfig =
-        serde_yml::from_str(&text).context("failed to parse routing YAML")?;
-    if config.version != 2 {
-        bail!("routing config version {} is not supported", config.version);
-    }
-
-    let default_reply_to = config.routes.default_reply_to.clone();
-    let resolved = TargetRegistry::new(config).resolve(target)?;
-    let envelope = RoutingEnvelope {
-        origin,
-        target: target.to_string(),
-        backend: resolved.backend.kind(),
-        role: MessageRole::User,
-        message,
-        cwd: Some(resolved.cwd),
-        session_id: resolved.session_id,
-        thread_id: resolved.thread_id,
-        reply_to: default_reply_to,
-        correlation_id: Uuid::new_v4().simple().to_string(),
-    };
-
-    match &resolved.backend {
-        BackendConfig::OpenCode { base_url } => {
-            OpenCodeBackend::new(base_url).inject(envelope).await
-        }
-        BackendConfig::Codex { .. } => {
-            CodexBackend::from_config(&resolved.backend)?
-                .inject(envelope)
-                .await
-        }
-        BackendConfig::Claude { .. } => {
-            bail!("Claude Huddle backend is documented but not implemented in this prototype")
-        }
-        BackendConfig::Zellij { .. } => {
-            bail!("zellij fallback injection is not implemented in the structured prototype")
-        }
-    }
+    Router::from_yaml(&text)?
+        .inject_text(target, message, origin)
+        .await
 }
 
 #[derive(Clone)]
@@ -925,10 +990,64 @@ agents:
     }
 
     #[test]
+    fn validates_config_v2_target_backends() {
+        let config: RoutingConfig = serde_yml::from_str(
+            r#"
+version: 2
+backends:
+  oc:
+    type: opencode
+    base_url: http://127.0.0.1:4096
+agents:
+  bad:
+    backend: missing
+    cwd: /home/andy/nixos
+"#,
+        )
+        .unwrap();
+
+        let error = config.validate().unwrap_err().to_string();
+        assert!(error.contains("unknown backend missing"));
+    }
+
+    #[test]
+    fn router_builds_envelope_with_reply_route() {
+        let router = Router::from_yaml(
+            r#"
+version: 2
+backends:
+  cx:
+    type: codex
+    url: ws://127.0.0.1:4107
+agents:
+  nixos-cx:
+    backend: cx
+    cwd: /home/andy/nixos
+    thread_id: thread-1
+routes:
+  default_reply_to: caller
+"#,
+        )
+        .unwrap();
+
+        let (envelope, backend) = router
+            .envelope_for("nixos-cx", "status".to_string(), "andy".to_string())
+            .unwrap();
+
+        assert_eq!(backend.kind(), BackendKind::Codex);
+        assert_eq!(envelope.target, "nixos-cx");
+        assert_eq!(envelope.cwd.as_deref(), Some("/home/andy/nixos"));
+        assert_eq!(envelope.thread_id.as_deref(), Some("thread-1"));
+        assert_eq!(envelope.reply_to.as_deref(), Some("caller"));
+        assert!(!envelope.correlation_id.is_empty());
+    }
+
+    #[test]
     fn routing_example_yaml_stays_parseable() {
         let config: RoutingConfig =
             serde_yml::from_str(include_str!("../routing.example.yaml")).unwrap();
 
+        config.validate().unwrap();
         assert!(config.backends.contains_key("opencode"));
         assert!(config.backends.contains_key("codex"));
         assert!(config.agents.contains_key("nixos-cx"));
