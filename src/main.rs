@@ -5,6 +5,7 @@ use anyhow::{Context, Result, bail};
 use bucket::TokenBucket;
 use mcp::McpClient;
 use serde::Deserialize;
+use serde::de;
 use serde_json::{Value, json};
 use std::{
     collections::{HashMap, HashSet, VecDeque},
@@ -30,15 +31,124 @@ struct Config {
     #[serde(default)]
     floating: bool,
     #[serde(default = "default_startup_delay")]
-    startup_delay: f64,
+    startup_delay: StartupDelay,
     #[serde(default = "default_poll_interval")]
-    poll_interval: f64,
+    poll_interval: PollInterval,
     #[serde(default = "default_timeout")]
-    timeout: f64,
+    timeout: Timeout,
+    #[allow(dead_code)]
     #[serde(default = "default_kill_on_done")]
     kill_on_done: bool,
     providers: HashMap<String, Provider>,
     tasks: Vec<Task>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, PartialOrd)]
+struct StartupDelay(f64);
+
+impl StartupDelay {
+    const DEFAULT: Self = Self(0.3);
+
+    fn new(value: f64) -> std::result::Result<Self, &'static str> {
+        if value.is_finite() && value >= 0.0 {
+            Ok(Self(value))
+        } else {
+            Err("startup_delay must be finite and >= 0")
+        }
+    }
+
+    fn as_duration(self) -> Duration {
+        Duration::from_secs_f64(self.0)
+    }
+}
+
+impl TryFrom<f64> for StartupDelay {
+    type Error = &'static str;
+
+    fn try_from(value: f64) -> std::result::Result<Self, Self::Error> {
+        Self::new(value)
+    }
+}
+
+impl<'de> Deserialize<'de> for StartupDelay {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        Self::try_from(f64::deserialize(deserializer)?).map_err(de::Error::custom)
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, PartialOrd)]
+struct PollInterval(f64);
+
+impl PollInterval {
+    const DEFAULT: Self = Self(0.25);
+
+    fn new(value: f64) -> std::result::Result<Self, &'static str> {
+        if value.is_finite() && value > 0.0 {
+            Ok(Self(value))
+        } else {
+            Err("poll_interval must be finite and > 0")
+        }
+    }
+
+    fn as_duration(self) -> Duration {
+        Duration::from_secs_f64(self.0)
+    }
+}
+
+impl TryFrom<f64> for PollInterval {
+    type Error = &'static str;
+
+    fn try_from(value: f64) -> std::result::Result<Self, Self::Error> {
+        Self::new(value)
+    }
+}
+
+impl<'de> Deserialize<'de> for PollInterval {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        Self::try_from(f64::deserialize(deserializer)?).map_err(de::Error::custom)
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, PartialOrd)]
+struct Timeout(f64);
+
+impl Timeout {
+    const DEFAULT: Self = Self(30.0);
+
+    fn new(value: f64) -> std::result::Result<Self, &'static str> {
+        if value.is_finite() && value > 0.0 {
+            Ok(Self(value))
+        } else {
+            Err("timeout must be finite and > 0")
+        }
+    }
+
+    fn as_duration(self) -> Duration {
+        Duration::from_secs_f64(self.0)
+    }
+}
+
+impl TryFrom<f64> for Timeout {
+    type Error = &'static str;
+
+    fn try_from(value: f64) -> std::result::Result<Self, Self::Error> {
+        Self::new(value)
+    }
+}
+
+impl<'de> Deserialize<'de> for Timeout {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        Self::try_from(f64::deserialize(deserializer)?).map_err(de::Error::custom)
+    }
 }
 
 #[derive(Clone, Deserialize)]
@@ -96,10 +206,7 @@ async fn main() -> Result<()> {
         .nth(2)
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("/tmp"));
-    let session = config
-        .session
-        .clone()
-        .or_else(detect_zellij_session_name);
+    let session = config.session.clone().or_else(detect_zellij_session_name);
     let mut config = config;
     config.session = session;
 
@@ -117,7 +224,14 @@ async fn main() -> Result<()> {
         .notify("notifications/initialized", json!({}))
         .await?;
 
-    let results = orchestrate(Arc::new(config.clone()), client.clone(), base, output_dir).await?;
+    let mut results = orchestrate(
+        Arc::new(config.clone()),
+        client.clone(),
+        base,
+        output_dir.clone(),
+    )
+    .await?;
+    wait_for_spawned_panes(client.clone(), &config, &mut results, &output_dir).await?;
     client.close().await;
     if timeout(Duration::from_secs(2), child.wait()).await.is_err() {
         let _ = child.kill().await;
@@ -158,12 +272,7 @@ async fn orchestrate(
     while !pending.is_empty() || !joins.is_empty() {
         for name in pending.clone() {
             let task = tasks.get(&name).unwrap();
-            let failed_dep = task.depends_on.iter().any(|d| {
-                results
-                    .get(d)
-                    .is_some_and(|r: &TaskResult| r.status != "done")
-            });
-            if failed_dep {
+            if has_failed_dependency(task, &results) {
                 results.insert(name.clone(), skipped(task));
                 pending.remove(&name);
             } else if task.depends_on.iter().all(|d| results.contains_key(d)) {
@@ -198,10 +307,14 @@ fn write_artifact(name: &str, output: &str, output_dir: &Path) {
         );
         return;
     }
-    let path = output_dir.join(format!("{name}.txt"));
+    let path = artifact_path(name, output_dir);
     if let Err(e) = fs::write(&path, output) {
         eprintln!("warning: failed to write artifact {}: {e}", path.display());
     }
+}
+
+fn artifact_path(name: &str, output_dir: &Path) -> PathBuf {
+    output_dir.join(format!("metastack-{}.txt", safe_name(name)))
 }
 
 async fn run_task(
@@ -250,7 +363,10 @@ async fn run_task_inner(
             "{}\n\nWhen complete, print exactly {}:0 on its own line.",
             task.prompt, sentinel
         ),
-        PromptMode::Shell => format!("{}\nprintf '\\n{}:%s\\n' \"$?\"", task.prompt, sentinel),
+        PromptMode::Shell => format!(
+            "{}\n__metastack_code=$?\nprintf '\\n{}:%s\\n' \"$__metastack_code\"\nexit \"$__metastack_code\"",
+            task.prompt, sentinel
+        ),
     };
 
     let cwd = task
@@ -269,7 +385,11 @@ async fn run_task_inner(
     add_opt(&mut args, "session", config.session.clone());
     add_opt(&mut args, "keep_focus_on", env::var("ZELLIJ_PANE_ID").ok());
     add_opt(&mut args, "target_pane_id", target_pane_id);
-    let pane_id = tool_data(&client.call_tool("spawn-pane", args).await?)?
+    let call_timeout = config.timeout.as_duration();
+    let spawn_result = timeout(call_timeout, client.call_tool("spawn-pane", args))
+        .await
+        .context("spawn-pane timed out")??;
+    let pane_id = tool_data(&spawn_result)?
         .get("pane_id")
         .and_then(Value::as_str)
         .context("spawn-pane did not return pane_id")?
@@ -278,35 +398,32 @@ async fn run_task_inner(
     let mut output = String::new();
     let mut status = "timeout".to_string();
     let work = async {
-        sleep(Duration::from_secs_f64(config.startup_delay)).await;
+        sleep(config.startup_delay.as_duration()).await;
         let mut send_args = json!({"pane_id": pane_id, "text": prompt, "submit": true});
         add_opt(&mut send_args, "session", config.session.clone());
-        tool_data(&client.call_tool("send-text", send_args).await?)?;
+        let send_result = timeout(call_timeout, client.call_tool("send-text", send_args))
+            .await
+            .context("send-text timed out")??;
+        tool_data(&send_result)?;
         loop {
             let mut read_args = json!({"pane_id": pane_id, "full": true});
             add_opt(&mut read_args, "session", config.session.clone());
-            output = extract_text(tool_data(&client.call_tool("read-pane", read_args).await?)?)
-                .unwrap_or_default();
+            let read_result = timeout(call_timeout, client.call_tool("read-pane", read_args))
+                .await
+                .context("read-pane timed out")??;
+            output = extract_text(tool_data(&read_result)?).unwrap_or_default();
             if let Some(code) = exit_code(&output, &sentinel) {
                 status = if code == "0" { "done" } else { "failed" }.into();
                 break;
             }
-            if started.elapsed() >= Duration::from_secs_f64(config.timeout) {
+            if started.elapsed() >= config.timeout.as_duration() {
                 break;
             }
-            sleep(Duration::from_secs_f64(config.poll_interval)).await;
+            sleep(config.poll_interval.as_duration()).await;
         }
         Ok::<(), anyhow::Error>(())
     };
     let error = work.await.err().map(|e| e.to_string());
-    if config.kill_on_done {
-        let mut args = json!({"pane_id": pane_id});
-        add_opt(&mut args, "session", config.session.clone());
-        let _ = client
-            .call_tool("kill-pane", args)
-            .await
-            .and_then(|r| tool_data(&r).map(|_| ()));
-    }
     Ok(TaskResult {
         status: if error.is_some() {
             "failed".into()
@@ -319,6 +436,54 @@ async fn run_task_inner(
         error,
         elapsed: started.elapsed().as_secs_f64(),
     })
+}
+
+async fn wait_for_spawned_panes(
+    client: Arc<McpClient>,
+    config: &Config,
+    results: &mut HashMap<String, TaskResult>,
+    output_dir: &Path,
+) -> Result<()> {
+    let mut running: HashMap<String, String> = results
+        .iter()
+        .filter(|(_, result)| result.pane_id != "-")
+        .map(|(name, result)| (name.clone(), result.pane_id.clone()))
+        .collect();
+
+    while !running.is_empty() {
+        for name in running.keys().cloned().collect::<Vec<_>>() {
+            let pane_id = running.get(&name).cloned().unwrap();
+            let mut args = json!({"pane_id": pane_id, "full": true});
+            add_opt(&mut args, "session", config.session.clone());
+            let read = timeout(
+                config.timeout.as_duration(),
+                client.call_tool("read-pane", args),
+            )
+            .await;
+
+            match read {
+                Ok(Ok(result)) => {
+                    if let Ok(data) = tool_data(&result) {
+                        if let (Some(result), Some(output)) =
+                            (results.get_mut(&name), extract_text(data))
+                        {
+                            result.output = output;
+                            write_artifact(&name, &result.output, output_dir);
+                        }
+                    } else {
+                        running.remove(&name);
+                    }
+                }
+                Ok(Err(_)) | Err(_) => {
+                    running.remove(&name);
+                }
+            }
+        }
+        if !running.is_empty() {
+            sleep(config.poll_interval.as_duration()).await;
+        }
+    }
+    Ok(())
 }
 
 fn tool_data(result: &Value) -> Result<&Value> {
@@ -464,6 +629,12 @@ fn add_opt(args: &mut Value, key: &str, value: Option<String>) {
     }
 }
 
+fn has_failed_dependency(task: &Task, results: &HashMap<String, TaskResult>) -> bool {
+    task.depends_on
+        .iter()
+        .any(|d| results.get(d).is_some_and(|r| r.status != "done"))
+}
+
 fn safe_name(name: &str) -> String {
     name.chars()
         .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
@@ -498,14 +669,14 @@ fn print_table(tasks: &[Task], results: &HashMap<String, TaskResult>) {
 fn default_direction() -> String {
     "right".into()
 }
-fn default_startup_delay() -> f64 {
-    0.3
+fn default_startup_delay() -> StartupDelay {
+    StartupDelay::DEFAULT
 }
-fn default_poll_interval() -> f64 {
-    0.25
+fn default_poll_interval() -> PollInterval {
+    PollInterval::DEFAULT
 }
-fn default_timeout() -> f64 {
-    30.0
+fn default_timeout() -> Timeout {
+    Timeout::DEFAULT
 }
 fn default_kill_on_done() -> bool {
     true
@@ -514,6 +685,38 @@ fn default_kill_on_done() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn valid_config() -> Config {
+        Config {
+            mcp_binary: "mcp".into(),
+            session: None,
+            direction: default_direction(),
+            target_pane_id: None,
+            floating: false,
+            startup_delay: StartupDelay::new(0.3).unwrap(),
+            poll_interval: PollInterval::new(0.25).unwrap(),
+            timeout: Timeout::new(30.0).unwrap(),
+            kill_on_done: default_kill_on_done(),
+            providers: HashMap::from([(
+                "default".into(),
+                Provider {
+                    command: vec!["sh".into()],
+                    prompt_mode: PromptMode::Shell,
+                    capacity: 1.0,
+                    refill_per_sec: 1.0,
+                },
+            )]),
+            tasks: vec![Task {
+                name: "task".into(),
+                provider: "default".into(),
+                prompt: "true".into(),
+                depends_on: Vec::new(),
+                cwd: None,
+                direction: None,
+                target_pane_id: None,
+            }],
+        }
+    }
 
     #[test]
     fn detects_zellij_session_name_from_environment() {
@@ -548,5 +751,138 @@ mod tests {
         });
 
         assert_eq!(session, None);
+    }
+
+    #[test]
+    fn validates_timing_values() {
+        let config = valid_config();
+        assert!(validate(&config).is_ok());
+
+        assert_eq!(
+            StartupDelay::new(-0.1),
+            Err("startup_delay must be finite and >= 0")
+        );
+        assert_eq!(
+            PollInterval::new(0.0),
+            Err("poll_interval must be finite and > 0")
+        );
+        assert_eq!(
+            Timeout::new(f64::INFINITY),
+            Err("timeout must be finite and > 0")
+        );
+
+        let invalid: std::result::Result<Config, _> = serde_yml::from_str(
+            r#"
+mcp_binary: mcp
+startup_delay: -0.1
+poll_interval: 0.25
+timeout: 30
+providers:
+  default:
+    command: [sh]
+    prompt_mode: shell
+    capacity: 1
+    refill_per_sec: 1
+tasks:
+  - name: task
+    provider: default
+    prompt: "true"
+"#,
+        );
+        assert!(
+            invalid
+                .err()
+                .unwrap()
+                .to_string()
+                .contains("startup_delay must be finite and >= 0")
+        );
+    }
+
+    #[test]
+    fn extracts_text_from_simple_and_mcp_tool_result_formats() {
+        let simple = json!({"text": "plain output"});
+        assert_eq!(extract_text(&simple).as_deref(), Some("plain output"));
+
+        let tool_result = json!({
+            "content": [
+                {"type": "text", "text": "mcp output"}
+            ]
+        });
+        assert_eq!(extract_text(&tool_result).as_deref(), Some("mcp output"));
+    }
+
+    #[test]
+    fn parses_exit_code_sentinels() {
+        let sentinel = "__METASTACK_DONE_task_abcd1234__";
+
+        assert_eq!(
+            exit_code(&format!("{sentinel}:0"), sentinel).as_deref(),
+            Some("0")
+        );
+        assert_eq!(
+            exit_code(&format!("{sentinel}:1"), sentinel).as_deref(),
+            Some("1")
+        );
+        assert_eq!(exit_code("output without sentinel", sentinel), None);
+
+        assert_eq!(
+            exit_code(&format!("{sentinel}:0\ntrailing output"), sentinel).as_deref(),
+            Some("0")
+        );
+        assert_eq!(
+            exit_code(&format!("before\n{sentinel}:0\nafter"), sentinel).as_deref(),
+            Some("0")
+        );
+        assert_eq!(
+            exit_code(&format!("leading output\n{sentinel}:0"), sentinel).as_deref(),
+            Some("0")
+        );
+        assert_eq!(
+            exit_code(
+                &format!("{sentinel}:1\nmore output\n{sentinel}:0"),
+                sentinel
+            )
+            .as_deref(),
+            Some("1")
+        );
+    }
+
+    #[test]
+    fn constructs_artifact_paths_with_safe_task_names() {
+        let output_dir = Path::new("/tmp/metastack-output");
+
+        assert_eq!(
+            artifact_path("build", output_dir),
+            output_dir.join("metastack-build.txt")
+        );
+        assert_eq!(
+            artifact_path("build: api/v1!", output_dir),
+            output_dir.join("metastack-build--api-v1-.txt")
+        );
+    }
+
+    #[test]
+    fn skips_task_when_dependency_failed() {
+        let mut task = valid_config().tasks.remove(0);
+        task.name = "deploy".into();
+        task.depends_on = vec!["build".into()];
+
+        let results = HashMap::from([(
+            "build".into(),
+            TaskResult {
+                status: "failed".into(),
+                provider: "default".into(),
+                pane_id: "pane-1".into(),
+                output: String::new(),
+                error: Some("command failed".into()),
+                elapsed: 1.0,
+            },
+        )]);
+
+        assert!(has_failed_dependency(&task, &results));
+
+        let result = skipped(&task);
+        assert_eq!(result.status, "skipped");
+        assert_eq!(result.error.as_deref(), Some("dependency failed"));
     }
 }
