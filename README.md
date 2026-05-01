@@ -57,11 +57,23 @@ nix develop -c cargo run -- metastack.yaml /tmp/metastack-output
 nix build
 ```
 
-The first positional argument is the config path. If omitted, it defaults to
-`./metastack.yaml`.
+Structured injection prototype:
 
-The second positional argument is the artifact output directory. If omitted, it
-defaults to `/tmp`.
+```bash
+cargo run -- inject routing.example.yaml nixos-cx "status update"
+```
+
+For this prototype, OpenCode targets require `opencode-serve` on
+`127.0.0.1:4096` with a session whose `directory` matches the target `cwd`.
+Codex targets require a `cx`/Codex app-server session on `127.0.0.1:4107` with
+a matching active or newest CLI thread. Claude/Huddle and zellij fallback are
+documented contracts, not active `metastack inject` adapters yet.
+
+For the DAG runner, the first positional argument is the config path. If
+omitted, it defaults to `./metastack.yaml`.
+
+For the DAG runner, the second positional argument is the artifact output
+directory. If omitted, it defaults to `/tmp`.
 
 ## Configuration Shape
 
@@ -171,6 +183,25 @@ materialization, service lifecycle, rollback, and secret injection. `metastack`
 should stay a small portable runtime that consumes a rendered config file.
 
 YAML remains the fallback and lowest-level format.
+
+## Structured Injection Roadmap
+
+The v0.3 branch introduces a routing prototype beside the existing DAG runner.
+The routing layer uses one common envelope and backend-specific adapters:
+
+```text
+OpenCode -> HTTP prompt_async
+Codex    -> JSON-RPC WebSocket app-server
+Claude   -> Huddle channel bridge
+Zellij   -> lossy keystroke fallback
+```
+
+`metastack inject <routing-config.yaml> <target> <message...>` is the prototype
+entry point for sending one user-message turn through a configured target.
+OpenCode and Codex are the first concrete adapters; Claude/Huddle and zellij
+fallback are documented as backend contracts for follow-up work.
+The CLI carries correlation metadata internally, but reply routing is still
+roadmap work.
 
 ## Current Limitations
 

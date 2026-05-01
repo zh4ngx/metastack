@@ -1,0 +1,32 @@
+version: 2
+
+backends:
+  opencode:
+    type: opencode
+    base_url: http://127.0.0.1:4096
+
+  codex:
+    type: codex
+    url: ws://127.0.0.1:4107
+    model: gpt-5.5
+    effort: xhigh
+    approval_policy: never
+    sandbox_policy:
+      type: dangerFullAccess
+
+  zellij:
+    type: zellij
+    mcp_binary: /home/andy/dev/zellij-mcp/target/debug/zellij-mcp
+    session: main
+
+agents:
+  vault-oc:
+    backend: opencode
+    cwd: /home/andy/vault
+
+  nixos-cx:
+    backend: codex
+    cwd: /home/andy/nixos
+
+routes:
+  default_reply_to: caller

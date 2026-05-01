@@ -1,5 +1,6 @@
 mod bucket;
 mod mcp;
+mod routing;
 
 use anyhow::{Context, Result, bail};
 use bucket::TokenBucket;
@@ -191,8 +192,14 @@ struct TaskResult {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let path = env::args()
-        .nth(1)
+    let args = env::args().skip(1).collect::<Vec<_>>();
+    if args.first().is_some_and(|arg| arg == "inject") {
+        return inject_command(&args[1..]).await;
+    }
+
+    let path = args
+        .first()
+        .cloned()
         .unwrap_or_else(|| "./metastack.yaml".into());
     let text = fs::read_to_string(&path).with_context(|| format!("failed to read {path}"))?;
     let config: Config = serde_yml::from_str(&text).context("failed to parse YAML")?;
@@ -202,8 +209,8 @@ async fn main() -> Result<()> {
         .unwrap_or(Path::new("."))
         .to_path_buf();
 
-    let output_dir = env::args()
-        .nth(2)
+    let output_dir = args
+        .get(1)
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("/tmp"));
     let session = config.session.clone().or_else(detect_zellij_session_name);
@@ -238,6 +245,29 @@ async fn main() -> Result<()> {
         let _ = child.wait().await;
     }
     print_table(&config.tasks, &results);
+    Ok(())
+}
+
+async fn inject_command(args: &[String]) -> Result<()> {
+    let config_path = args
+        .first()
+        .context("usage: metastack inject <routing-config.yaml> <target> <message...>")?;
+    let target = args
+        .get(1)
+        .context("usage: metastack inject <routing-config.yaml> <target> <message...>")?;
+    let message = args
+        .get(2..)
+        .filter(|parts| !parts.is_empty())
+        .context("usage: metastack inject <routing-config.yaml> <target> <message...>")?
+        .join(" ");
+    let origin = env::var("USER").unwrap_or_else(|_| "metastack".to_string());
+    let receipt =
+        routing::inject_from_config_path(Path::new(config_path), target, message, origin).await?;
+
+    println!(
+        "injected backend={:?} target={} status={:?} correlation_id={}",
+        receipt.backend, receipt.target, receipt.status, receipt.correlation_id
+    );
     Ok(())
 }
 
