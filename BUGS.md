@@ -48,7 +48,7 @@ Result: 2/3 tasks completed (done), 1/3 failed. Review outputs lost due to kill_
 
 **Root cause:** TaskResult contains `output: String` but `print_table` doesn't display it. There's no log file, no artifact directory, no persistence.
 
-**Fix (v0.1):** Second positional CLI arg becomes output dir (default `/tmp`). Artifacts written to `{output_dir}/metastack-{task_name}.txt`.
+**Fix (v0.1):** Second positional CLI arg becomes output dir (default `/tmp`). Artifacts written to `{output_dir}/metastack-{safe_task_name}.txt`.
 
 ---
 
@@ -71,3 +71,12 @@ Result: 2/3 tasks completed (done), 1/3 failed. Review outputs lost due to kill_
 | review-wasi | failed | 36.59s | Error: "Separator is found, but chunk is longer than limit" |
 
 The review-wasi failure is likely a codex exec error (possibly YAML parsing of a long line in the prompt, or serde_yml choking on output). Needs reproduction with output persistence to diagnose.
+
+---
+
+## TODO (post v0.1)
+
+- **kill_on_done dead code**: `wait_for_spawned_panes()` replaced per-task kill; `kill_on_done` field is now dead code in Config. Either remove from struct (breaking YAML compat) or wire as global kill-after-wait flag.
+- **orchestration test coverage**: Current tests cover focused regressions, not full runtime orchestration. Add fake MCP coverage for `spawn-pane`/`send-text`/`read-pane` sequencing, `wait_for_spawned_panes()`, provider rate limiting, validation edge cases, and shell-wrapper exit-code behavior.
+- **Nix-declared topology**: Keep YAML as the portable runtime config, but add a Nix/Home Manager layer that declares providers, tasks, sessions, rate limits, secrets, and service lifecycle, then renders YAML/JSON for `metastack`. Do not embed Nix evaluation in the Rust binary.
+- **v0.2 — caller notification (`--notify-pane <id>`)**: After DAG completion, metastack should push a completion message back to the caller's pane via zellij-mcp `send-text`. Replace the current two-layer push-back shell wrapper (trap+sentinel+zellij write-chars chain) with a single metastack flag. The caller runs `metastack config.yaml /tmp/out --notify-pane terminal_0 &` and gets a `[metastack:done]` ping on completion. This is the missing primitive for async dispatch — the caller doesn't poll or wrap; metastack owns the lifecycle notification. Should work with claude-opus (stdin-based submit) and opencode (same); codex interactive pane remains human-driven (crossterm KeyEvent layer mismatch).
