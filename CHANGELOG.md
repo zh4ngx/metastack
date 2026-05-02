@@ -1,5 +1,12 @@
 # Changelog
 
+## v0.10.2 - 2026-05-02
+
+- Clarify that zellij is supported only for DAG task execution in the current
+  release.
+- Document that `metastack send` does not implicitly fall back to zellij pane
+  typing when structured backends are unavailable or ambiguous.
+
 ## v0.10.1 - 2026-05-02
 
 - Ignore Codex `thread/list` records whose status is not `active` or `idle`

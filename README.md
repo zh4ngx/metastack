@@ -27,7 +27,11 @@ Structured send support:
 | OpenCode | implemented prototype | sends one user-message turn through `prompt_async`; no reply routing yet |
 | Codex | implemented prototype | starts one user-message turn through the app-server WebSocket; no reply routing yet |
 | Claude/Huddle | implemented prototype | checks `huddle sessions`, then shells out to `huddle send`; local submission only, no reply routing yet |
-| zellij fallback | planned | documented lossy fallback only |
+| zellij fallback | not implemented | zellij is supported for DAG task execution only |
+
+Structured send never implicitly falls back to zellij pane typing. If a
+configured backend is unavailable or ambiguous, `metastack send` fails closed so
+the caller can fix the backend service, target config, or explicit session pin.
 
 For routing topology, internal envelopes, and protocol semantics, see
 [ARCHITECTURE.md](./ARCHITECTURE.md).
@@ -74,8 +78,8 @@ nix profile install .
 With Nix from GitHub:
 
 ```bash
-nix run github:zh4ngx/metastack/v0.10.1 -- <args>
-nix profile install github:zh4ngx/metastack/v0.10.1
+nix run github:zh4ngx/metastack/v0.10.2 -- <args>
+nix profile install github:zh4ngx/metastack/v0.10.2
 ```
 
 Declarative NixOS/Home Manager users can enable the exported
@@ -86,7 +90,7 @@ For a flake-based NixOS or Home Manager config, add the input:
 
 ```nix
 {
-  inputs.metastack.url = "github:zh4ngx/metastack/v0.10.1";
+  inputs.metastack.url = "github:zh4ngx/metastack/v0.10.2";
 }
 ```
 
@@ -131,7 +135,7 @@ The Home Manager module installs the package and can render the canonical
 With Cargo:
 
 ```bash
-cargo install --git https://github.com/zh4ngx/metastack.git --tag v0.10.1 --locked
+cargo install --git https://github.com/zh4ngx/metastack.git --tag v0.10.2 --locked
 ```
 
 From a local checkout:
@@ -378,7 +382,9 @@ other than the configured target; this preserves single-target routing
 semantics.
 
 zellij fallback targets may parse as config concepts, but `metastack send`
-currently returns an explicit "not implemented" error for them.
+currently returns an explicit "not implemented" error for them. Do not use
+zellij as an implicit recovery path for failed structured send; fix the
+backend/config issue or choose a future explicit lossy primitive.
 
 ## Safety
 
@@ -550,7 +556,8 @@ External NixOS/Home Manager definitions
 
 metastack binary
   reads rendered YAML
-  talks to zellij-mcp
+  routes structured sends to configured backends
+  talks to zellij-mcp for DAG tasks
   orchestrates the DAG
 ```
 
@@ -566,6 +573,9 @@ documented runtime config format.
 
 - DAG tasks run in zellij panes; the DAG runner is not a general headless
   dispatch tool.
+- zellij is not a structured-send transport in this release. `metastack send`
+  does not type into panes when OpenCode, Codex, or Huddle targets are
+  unavailable.
 - `kill_on_done` is still accepted in config for compatibility, but is currently
   ignored after the post-DAG output drain change.
 - Pane layout is constrained by what `zellij-mcp` exposes. `direction` and

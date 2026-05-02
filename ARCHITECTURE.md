@@ -20,7 +20,8 @@ metastack
 
 This path is still useful and should remain portable. It is separate from
 structured send; terminal fallback for `metastack send` is design-only and is
-not implemented yet.
+not implemented. In the current release, zellij support is limited to DAG task
+execution.
 
 ## Target Runtime
 
@@ -136,7 +137,8 @@ The current prototype is narrower than the full envelope:
   "return to caller/parent", not arbitrary peer addressing.
 - OpenCode, Codex, and Claude/Huddle are the implemented prototype adapters.
 - zellij fallback remains a design contract/stub until its addressing and reply
-  semantics are precise.
+  semantics are precise. It is not an implicit recovery path for failed
+  structured sends.
 - OpenCode and Codex implicit discovery fail closed when a target `cwd` matches
   multiple live candidate sessions or threads. Codex ignores stale `notLoaded`
   thread records and considers only `active` or `idle` CLI threads. Pin
@@ -181,7 +183,8 @@ explicit_lossy
 on_unavailable
 ```
 
-Codex `cx` sessions should not silently degrade to zellij. Zellij fallback is a
+Codex `cx` sessions should not silently degrade to zellij. OpenCode and Huddle
+targets should not silently degrade to zellij either. Zellij fallback is a
 future design-only path for raw or user-launched TUIs where the caller
 explicitly accepts lossy keystroke sending.
 
@@ -345,7 +348,8 @@ of scope.
 ### Zellij Fallback (Design Only)
 
 Zellij remains an explicit lossy fallback design option, but it is not
-implemented by `metastack send`:
+implemented by `metastack send` and is not part of the current structured-send
+surface:
 
 ```text
 zellij-mcp send-text
@@ -361,6 +365,8 @@ Codex app-server backend for `cx` sessions.
 This fallback remains a separate future `send_running_lossy()` primitive, not a
 structured provider in the current prototype. Today, zellij send config parses as
 a schema concept, but dispatch returns an explicit "not implemented" error.
+Agents should not infer or implement an automatic pane-typing fallback when a
+structured backend is unavailable.
 
 ## Routing Config V2
 
