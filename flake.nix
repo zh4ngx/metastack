@@ -90,6 +90,14 @@
               echo "Cargo.toml version $cargo_version does not match Nix package version $package_version" >&2
               exit 1
             fi
+            if ! grep -q "github:zh4ngx/metastack/v$cargo_version" ${./README.md}; then
+              echo "README.md install examples do not reference v$cargo_version" >&2
+              exit 1
+            fi
+            if ! grep -q "## v$cargo_version " ${./CHANGELOG.md}; then
+              echo "CHANGELOG.md is missing an entry for v$cargo_version" >&2
+              exit 1
+            fi
             touch "$out"
           '';
 

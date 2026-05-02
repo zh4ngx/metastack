@@ -22,6 +22,7 @@ use tokio::{
 use uuid::Uuid;
 
 #[derive(Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct Config {
     mcp_binary: String,
     session: Option<String>,
@@ -153,6 +154,7 @@ impl<'de> Deserialize<'de> for Timeout {
 }
 
 #[derive(Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct Provider {
     command: Vec<String>,
     prompt_mode: PromptMode,
@@ -168,6 +170,7 @@ enum PromptMode {
 }
 
 #[derive(Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct Task {
     name: String,
     provider: String,
@@ -496,10 +499,7 @@ async fn run_task_inner(
     let uuid = Uuid::new_v4().simple().to_string();
     let sentinel = format!("__METASTACK_DONE_{}_{}__", safe, &uuid[..8]);
     let prompt = match provider.prompt_mode {
-        PromptMode::Instruction => format!(
-            "{}\n\nWhen complete, print exactly {}:0 on its own line.",
-            task.prompt, sentinel
-        ),
+        PromptMode::Instruction => instruction_prompt(&task.prompt, &sentinel),
         PromptMode::Shell => format!(
             "{}\n__metastack_code=$?\nprintf '\\n{}:%s\\n' \"$__metastack_code\"\nexit \"$__metastack_code\"",
             task.prompt, sentinel
@@ -581,11 +581,7 @@ async fn wait_for_spawned_panes(
     results: &mut HashMap<String, TaskResult>,
     output_dir: &Path,
 ) -> Result<()> {
-    let mut running: HashMap<String, String> = results
-        .iter()
-        .filter(|(_, result)| result.pane_id != "-")
-        .map(|(name, result)| (name.clone(), result.pane_id.clone()))
-        .collect();
+    let mut running = drainable_panes(results);
 
     while !running.is_empty() {
         for name in running.keys().cloned().collect::<Vec<_>>() {
@@ -607,6 +603,7 @@ async fn wait_for_spawned_panes(
                             result.output = output;
                             write_artifact(&name, &result.output, output_dir);
                         }
+                        running.remove(&name);
                     } else {
                         running.remove(&name);
                     }
@@ -621,6 +618,14 @@ async fn wait_for_spawned_panes(
         }
     }
     Ok(())
+}
+
+fn drainable_panes(results: &HashMap<String, TaskResult>) -> HashMap<String, String> {
+    results
+        .iter()
+        .filter(|(_, result)| result.pane_id != "-" && result.status == "done")
+        .map(|(name, result)| (name.clone(), result.pane_id.clone()))
+        .collect()
 }
 
 fn tool_data(result: &Value) -> Result<&Value> {
@@ -680,6 +685,9 @@ fn validate(config: &Config) -> Result<()> {
         }
     }
     for (name, p) in &config.providers {
+        if !p.capacity.is_finite() || !p.refill_per_sec.is_finite() {
+            bail!("provider {name} requires finite capacity and refill_per_sec");
+        }
         if p.capacity < 1.0 || p.refill_per_sec <= 0.0 {
             bail!("provider {name} requires capacity >= 1 and refill_per_sec > 0");
         }
@@ -729,14 +737,14 @@ fn validate(config: &Config) -> Result<()> {
 fn exit_code(output: &str, sentinel: &str) -> Option<String> {
     let prefix = format!("{sentinel}:");
     output
-        .match_indices(&prefix)
-        .filter_map(|(idx, _)| {
-            output[idx + prefix.len()..]
-                .split_whitespace()
-                .next()
+        .lines()
+        .filter_map(|line| {
+            line.trim()
+                .strip_prefix(&prefix)
+                .map(str::trim)
                 .map(str::to_string)
         })
-        .find(|s| s.chars().all(|ch| ch.is_ascii_digit()))
+        .find(|s| !s.is_empty() && s.chars().all(|ch| ch.is_ascii_digit()))
 }
 
 fn extract_text(value: &Value) -> Option<String> {
@@ -801,6 +809,12 @@ fn skipped(task: &Task) -> TaskResult {
         error: Some("dependency failed".into()),
         elapsed: 0.0,
     }
+}
+
+fn instruction_prompt(prompt: &str, sentinel: &str) -> String {
+    format!(
+        "{prompt}\n\nWhen complete, print the token {sentinel} followed immediately by a colon and exit code 0 on its own line."
+    )
 }
 
 fn print_table(tasks: &[Task], results: &HashMap<String, TaskResult>) {
@@ -949,6 +963,63 @@ tasks:
     }
 
     #[test]
+    fn rejects_unknown_dag_config_fields() {
+        let top_level: std::result::Result<Config, _> = serde_yml::from_str(
+            r#"
+mcp_binary: mcp
+unknown: true
+providers:
+  default:
+    command: [sh]
+    prompt_mode: shell
+    capacity: 1
+    refill_per_sec: 1
+tasks:
+  - name: task
+    provider: default
+    prompt: "true"
+"#,
+        );
+        assert!(top_level.is_err());
+
+        let provider: std::result::Result<Config, _> = serde_yml::from_str(
+            r#"
+mcp_binary: mcp
+providers:
+  default:
+    command: [sh]
+    prompt_mode: shell
+    capacity: 1
+    refill_per_sec: 1
+    extra: true
+tasks:
+  - name: task
+    provider: default
+    prompt: "true"
+"#,
+        );
+        assert!(provider.is_err());
+
+        let task: std::result::Result<Config, _> = serde_yml::from_str(
+            r#"
+mcp_binary: mcp
+providers:
+  default:
+    command: [sh]
+    prompt_mode: shell
+    capacity: 1
+    refill_per_sec: 1
+tasks:
+  - name: task
+    provider: default
+    prompt: "true"
+    depends_on: [other]
+"#,
+        );
+        assert!(task.is_err());
+    }
+
+    #[test]
     fn smoke_test_example_yaml_stays_parseable() {
         let config: Config = serde_yml::from_str(include_str!("../smoke-test.example.yaml"))
             .expect("smoke-test.example.yaml should parse");
@@ -989,6 +1060,16 @@ tasks:
         let error = validate(&config).unwrap_err().to_string();
 
         assert!(error.contains("produces an empty artifact name"));
+    }
+
+    #[test]
+    fn validates_provider_rates_are_finite() {
+        let mut config = valid_config();
+        config.providers.get_mut("default").unwrap().capacity = f64::INFINITY;
+
+        let error = validate(&config).unwrap_err().to_string();
+
+        assert!(error.contains("requires finite capacity and refill_per_sec"));
     }
 
     fn send_args(parts: &[&str]) -> Vec<String> {
@@ -1237,6 +1318,59 @@ tasks:
     }
 
     #[test]
+    fn post_dag_drain_only_tracks_completed_panes() {
+        let results = HashMap::from([
+            (
+                "done".to_string(),
+                TaskResult {
+                    status: "done".to_string(),
+                    provider: "default".to_string(),
+                    pane_id: "terminal_1".to_string(),
+                    output: String::new(),
+                    error: None,
+                    elapsed: 0.0,
+                },
+            ),
+            (
+                "timeout".to_string(),
+                TaskResult {
+                    status: "timeout".to_string(),
+                    provider: "default".to_string(),
+                    pane_id: "terminal_2".to_string(),
+                    output: String::new(),
+                    error: None,
+                    elapsed: 0.0,
+                },
+            ),
+            (
+                "failed".to_string(),
+                TaskResult {
+                    status: "failed".to_string(),
+                    provider: "default".to_string(),
+                    pane_id: "terminal_3".to_string(),
+                    output: String::new(),
+                    error: Some("boom".to_string()),
+                    elapsed: 0.0,
+                },
+            ),
+        ]);
+
+        assert_eq!(
+            drainable_panes(&results),
+            HashMap::from([("done".to_string(), "terminal_1".to_string())])
+        );
+    }
+
+    #[test]
+    fn instruction_prompt_does_not_embed_parseable_sentinel_completion() {
+        let sentinel = "__METASTACK_DONE_task_abcd1234__";
+        let prompt = instruction_prompt("review code", sentinel);
+
+        assert!(prompt.contains(sentinel));
+        assert_eq!(exit_code(&prompt, sentinel), None);
+    }
+
+    #[test]
     fn extracts_text_from_simple_and_mcp_tool_result_formats() {
         let simple = json!({"text": "plain output"});
         assert_eq!(extract_text(&simple).as_deref(), Some("plain output"));
@@ -1283,6 +1417,16 @@ tasks:
             .as_deref(),
             Some("1")
         );
+        assert_eq!(
+            exit_code(
+                &format!("print exactly {sentinel}:0 on its own line"),
+                sentinel
+            ),
+            None
+        );
+        assert_eq!(exit_code(&format!("{sentinel}:0 trailing"), sentinel), None);
+        assert_eq!(exit_code(&format!("{sentinel}:"), sentinel), None);
+        assert_eq!(exit_code(&format!("{sentinel}:   "), sentinel), None);
     }
 
     #[test]

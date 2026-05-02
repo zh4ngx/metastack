@@ -1,5 +1,18 @@
 # Changelog
 
+## v0.8.0 - 2026-05-02
+
+- Reject unknown DAG config, provider, and task fields instead of silently
+  ignoring typos such as `depends_on`.
+- Prevent post-DAG output draining from polling timed-out or failed panes
+  indefinitely.
+- Require DAG completion sentinels to appear at the start of a trimmed output
+  line with only the exit code after the colon, preventing echoed instruction
+  prompts from completing tasks early.
+- Reject non-finite provider `capacity` and `refill_per_sec` values.
+- Extend the release version guard to check README install tags and changelog
+  entries against Cargo package metadata.
+
 ## v0.7.1 - 2026-05-02
 
 - Fail closed for implicit Codex thread discovery when `thread/list` lacks
