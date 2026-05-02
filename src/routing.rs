@@ -774,7 +774,7 @@ impl CodexBackend {
                 "clientInfo": {
                     "name": "metastack-codex-adapter",
                     "title": "metastack Codex adapter",
-                    "version": "0.3.0"
+                    "version": "0.5.0"
                 },
                 "capabilities": {
                     "experimentalApi": true

@@ -228,7 +228,7 @@ async fn main() -> Result<()> {
             "initialize",
             json!({
                 "protocolVersion": "2024-11-05", "capabilities": {},
-                "clientInfo": {"name": "metastack", "version": "0.1.0"}
+                "clientInfo": {"name": "metastack", "version": "0.5.0"}
             }),
         )
         .await?;

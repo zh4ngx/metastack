@@ -32,6 +32,15 @@ Structured send support:
 For routing topology, internal envelopes, and protocol semantics, see
 [ARCHITECTURE.md](./ARCHITECTURE.md).
 
+## Release Practice
+
+Agent work happens on named branches until it is ready to promote. Releases are
+merged to `main` with an explicit version bump and tag. Downstream declarative
+systems such as NixOS should consume tags or pinned revisions, not floating
+`main`. While `metastack` is pre-1.0, patch releases are for compatible bug
+fixes and minor releases are for new behavior or compatibility-affecting CLI or
+config changes.
+
 ## Vocabulary
 
 - `send`: public CLI action that submits one user-message turn to a concrete
