@@ -1,6 +1,6 @@
 #![allow(dead_code)]
 
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{Context, Result, bail};
 use futures_util::{SinkExt, StreamExt, future::BoxFuture};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -22,6 +22,8 @@ pub enum BackendKind {
 #[serde(rename_all = "snake_case")]
 pub enum MessageRole {
     User,
+    // Reserved for future backend-specific role-aware delivery. The v0.3
+    // public `send` command always creates user-message turns.
     Agent,
     System,
 }
@@ -52,17 +54,16 @@ pub struct RoutingEnvelope {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub enum InjectionStatus {
-    Queued,
-    Completed,
+pub enum SendStatus {
+    Accepted,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct InjectionReceipt {
+pub struct SendReceipt {
     pub backend: BackendKind,
     pub target: String,
     pub correlation_id: String,
-    pub status: InjectionStatus,
+    pub status: SendStatus,
     pub session_id: Option<String>,
     pub thread_id: Option<String>,
 }
@@ -130,7 +131,7 @@ pub enum FallbackPolicy {
 pub struct BackendCapabilities {
     pub backend: BackendKind,
     pub preserves_role: bool,
-    pub has_completion_readback: bool,
+    pub has_delivery_receipt: bool,
     pub is_lossy: bool,
 }
 
@@ -140,25 +141,25 @@ impl BackendCapabilities {
             BackendKind::OpenCode => Self {
                 backend,
                 preserves_role: false,
-                has_completion_readback: false,
+                has_delivery_receipt: true,
                 is_lossy: false,
             },
             BackendKind::Codex => Self {
                 backend,
                 preserves_role: false,
-                has_completion_readback: true,
+                has_delivery_receipt: true,
                 is_lossy: false,
             },
             BackendKind::Claude => Self {
                 backend,
                 preserves_role: true,
-                has_completion_readback: true,
+                has_delivery_receipt: false,
                 is_lossy: false,
             },
             BackendKind::Zellij => Self {
                 backend,
                 preserves_role: false,
-                has_completion_readback: false,
+                has_delivery_receipt: false,
                 is_lossy: true,
             },
         }
@@ -188,9 +189,9 @@ pub struct RouteEvent {
     pub text: Option<String>,
 }
 
-pub trait InjectionBackend: Send + Sync {
+pub trait SendBackend: Send + Sync {
     fn kind(&self) -> BackendKind;
-    fn inject<'a>(&'a self, envelope: RoutingEnvelope) -> BoxFuture<'a, Result<InjectionReceipt>>;
+    fn send<'a>(&'a self, envelope: RoutingEnvelope) -> BoxFuture<'a, Result<SendReceipt>>;
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -387,47 +388,44 @@ impl Router {
         Ok((envelope, resolved.backend))
     }
 
-    pub async fn inject_text(
+    pub async fn send_text(
         &self,
         target: &str,
         message: String,
         origin: String,
-    ) -> Result<InjectionReceipt> {
+    ) -> Result<SendReceipt> {
         let (envelope, backend) = self.envelope_for(target, message, origin)?;
         Self::dispatch(backend, envelope).await
     }
 
-    async fn dispatch(
-        backend: BackendConfig,
-        envelope: RoutingEnvelope,
-    ) -> Result<InjectionReceipt> {
+    async fn dispatch(backend: BackendConfig, envelope: RoutingEnvelope) -> Result<SendReceipt> {
         match &backend {
             BackendConfig::OpenCode { base_url } => {
-                OpenCodeBackend::new(base_url).inject(envelope).await
+                OpenCodeBackend::new(base_url).send(envelope).await
             }
             BackendConfig::Codex { .. } => {
-                CodexBackend::from_config(&backend)?.inject(envelope).await
+                CodexBackend::from_config(&backend)?.send(envelope).await
             }
             BackendConfig::Claude { .. } => {
                 bail!("Claude Huddle backend is documented but not implemented in this prototype")
             }
             BackendConfig::Zellij { .. } => {
-                bail!("zellij fallback injection is not implemented in the structured prototype")
+                bail!("zellij fallback send is not implemented in the structured prototype")
             }
         }
     }
 }
 
-pub async fn inject_from_config_path(
+pub async fn send_from_config_path(
     path: &Path,
     target: &str,
     message: String,
     origin: String,
-) -> Result<InjectionReceipt> {
+) -> Result<SendReceipt> {
     let text =
         fs::read_to_string(path).with_context(|| format!("failed to read {}", path.display()))?;
     Router::from_yaml(&text)?
-        .inject_text(target, message, origin)
+        .send_text(target, message, origin)
         .await
 }
 
@@ -485,12 +483,12 @@ impl OpenCodeBackend {
     }
 }
 
-impl InjectionBackend for OpenCodeBackend {
+impl SendBackend for OpenCodeBackend {
     fn kind(&self) -> BackendKind {
         BackendKind::OpenCode
     }
 
-    fn inject<'a>(&'a self, envelope: RoutingEnvelope) -> BoxFuture<'a, Result<InjectionReceipt>> {
+    fn send<'a>(&'a self, envelope: RoutingEnvelope) -> BoxFuture<'a, Result<SendReceipt>> {
         Box::pin(async move {
             ensure_user_message(&envelope)?;
             let session_id = match envelope.session_id.clone() {
@@ -499,7 +497,7 @@ impl InjectionBackend for OpenCodeBackend {
                     let cwd = envelope
                         .cwd
                         .as_deref()
-                        .context("OpenCode injection requires cwd or session_id")?;
+                        .context("OpenCode send requires cwd or session_id")?;
                     self.discover_session(cwd).await?
                 }
             };
@@ -511,11 +509,11 @@ impl InjectionBackend for OpenCodeBackend {
                 .await?
                 .error_for_status()?;
 
-            Ok(InjectionReceipt {
+            Ok(SendReceipt {
                 backend: BackendKind::OpenCode,
                 target: envelope.target,
                 correlation_id: envelope.correlation_id,
-                status: InjectionStatus::Queued,
+                status: SendStatus::Accepted,
                 session_id: Some(session_id),
                 thread_id: envelope.thread_id,
             })
@@ -558,7 +556,6 @@ pub struct CodexBackend {
     approval_policy: String,
     sandbox_policy: Value,
     transport_timeout: Duration,
-    completion_timeout: Duration,
 }
 
 impl CodexBackend {
@@ -570,7 +567,6 @@ impl CodexBackend {
             approval_policy: default_codex_approval_policy(),
             sandbox_policy: default_codex_sandbox_policy(),
             transport_timeout: default_transport_timeout(),
-            completion_timeout: Duration::from_secs(300),
         }
     }
 
@@ -593,7 +589,6 @@ impl CodexBackend {
             approval_policy: approval_policy.clone(),
             sandbox_policy: sandbox_policy.clone(),
             transport_timeout: default_transport_timeout(),
-            completion_timeout: Duration::from_secs(300),
         })
     }
 
@@ -724,32 +719,6 @@ impl CodexBackend {
             .and_then(|status| status.get("type").or(Some(status)))
             .and_then(Value::as_str)
     }
-
-    fn turn_id(value: &Value) -> Option<String> {
-        value
-            .get("turn")
-            .or_else(|| value.get("params").and_then(|params| params.get("turn")))
-            .and_then(|turn| turn.get("id"))
-            .or_else(|| value.get("turnId"))
-            .or_else(|| value.get("params").and_then(|params| params.get("turnId")))
-            .and_then(Value::as_str)
-            .map(str::to_string)
-    }
-
-    fn turn_status(value: &Value) -> Option<&str> {
-        value
-            .get("turn")
-            .or_else(|| value.get("params").and_then(|params| params.get("turn")))
-            .and_then(|turn| turn.get("status"))
-            .and_then(Value::as_str)
-    }
-
-    fn notification_thread_id(value: &Value) -> Option<&str> {
-        value
-            .get("params")
-            .and_then(|params| params.get("threadId"))
-            .and_then(Value::as_str)
-    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -758,18 +727,15 @@ struct CodexThreadRef {
     status: Option<String>,
 }
 
-impl InjectionBackend for CodexBackend {
+impl SendBackend for CodexBackend {
     fn kind(&self) -> BackendKind {
         BackendKind::Codex
     }
 
-    fn inject<'a>(&'a self, envelope: RoutingEnvelope) -> BoxFuture<'a, Result<InjectionReceipt>> {
+    fn send<'a>(&'a self, envelope: RoutingEnvelope) -> BoxFuture<'a, Result<SendReceipt>> {
         Box::pin(async move {
             ensure_user_message(&envelope)?;
-            let cwd = envelope
-                .cwd
-                .as_deref()
-                .context("Codex injection requires cwd")?;
+            let cwd = envelope.cwd.as_deref().context("Codex send requires cwd")?;
             let (mut ws, _) =
                 tokio::time::timeout(self.transport_timeout, connect_async(&self.url))
                     .await
@@ -818,55 +784,16 @@ impl InjectionBackend for CodexBackend {
                     .into(),
             ))
             .await?;
-            let turn_response = wait_for_response(&mut ws, next_id, self.transport_timeout).await?;
-            let turn_id =
-                Self::turn_id(&turn_response).context("Codex turn/start did not return turn id")?;
+            wait_for_response(&mut ws, next_id, self.transport_timeout).await?;
 
-            let completed = tokio::time::timeout(self.completion_timeout, async {
-                loop {
-                    let value = next_ws_json(&mut ws).await?;
-                    if let Some(error) = value.get("error") {
-                        bail!("Codex app-server error: {error}");
-                    }
-                    let method = value.get("method").and_then(Value::as_str);
-                    if method == Some("error") {
-                        bail!("Codex turn error: {}", value["params"]);
-                    }
-                    if method.is_some_and(is_codex_approval_or_input_request) {
-                        bail!("Codex requested approval or user input: {}", value);
-                    }
-                    if method == Some("turn/completed") {
-                        if Self::notification_thread_id(&value) != Some(thread_id.as_str())
-                            || Self::turn_id(&value).as_deref() != Some(turn_id.as_str())
-                        {
-                            continue;
-                        }
-
-                        match Self::turn_status(&value) {
-                            Some("completed") => return Ok::<(), anyhow::Error>(()),
-                            Some(status) => bail!(
-                                "Codex turn completed with status {status}: {}",
-                                value["params"]["turn"]["error"]
-                            ),
-                            None => bail!("Codex turn/completed omitted turn status"),
-                        }
-                    }
-                }
+            Ok(SendReceipt {
+                backend: BackendKind::Codex,
+                target: envelope.target,
+                correlation_id: envelope.correlation_id,
+                status: SendStatus::Accepted,
+                session_id: envelope.session_id,
+                thread_id: Some(thread_id),
             })
-            .await;
-
-            match completed {
-                Ok(Ok(())) => Ok(InjectionReceipt {
-                    backend: BackendKind::Codex,
-                    target: envelope.target,
-                    correlation_id: envelope.correlation_id,
-                    status: InjectionStatus::Completed,
-                    session_id: envelope.session_id,
-                    thread_id: Some(thread_id),
-                }),
-                Ok(Err(err)) => Err(err),
-                Err(_) => Err(anyhow!("timed out waiting for Codex turn completion")),
-            }
         })
     }
 }
@@ -924,14 +851,6 @@ fn ensure_user_message(envelope: &RoutingEnvelope) -> Result<()> {
     }
 }
 
-fn is_codex_approval_or_input_request(method: &str) -> bool {
-    method.contains("requestApproval")
-        || method.contains("requestUserInput")
-        || method.contains("elicitation/request")
-        || method == "applyPatchApproval"
-        || method == "execCommandApproval"
-}
-
 fn default_codex_model() -> String {
     "gpt-5.5".to_string()
 }
@@ -962,21 +881,18 @@ mod tests {
 
     struct FakeBackend;
 
-    impl InjectionBackend for FakeBackend {
+    impl SendBackend for FakeBackend {
         fn kind(&self) -> BackendKind {
             BackendKind::Claude
         }
 
-        fn inject<'a>(
-            &'a self,
-            envelope: RoutingEnvelope,
-        ) -> BoxFuture<'a, Result<InjectionReceipt>> {
+        fn send<'a>(&'a self, envelope: RoutingEnvelope) -> BoxFuture<'a, Result<SendReceipt>> {
             Box::pin(async move {
-                Ok(InjectionReceipt {
+                Ok(SendReceipt {
                     backend: BackendKind::Claude,
                     target: envelope.target,
                     correlation_id: envelope.correlation_id,
-                    status: InjectionStatus::Completed,
+                    status: SendStatus::Accepted,
                     session_id: envelope.session_id,
                     thread_id: envelope.thread_id,
                 })
@@ -1000,13 +916,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn injection_backend_trait_dispatches_envelope() {
-        let receipt = FakeBackend.inject(envelope()).await.unwrap();
+    async fn send_backend_trait_dispatches_envelope() {
+        let receipt = FakeBackend.send(envelope()).await.unwrap();
 
         assert_eq!(receipt.backend, BackendKind::Claude);
         assert_eq!(receipt.target, "nixos-cx");
         assert_eq!(receipt.correlation_id, "corr-1");
-        assert_eq!(receipt.status, InjectionStatus::Completed);
+        assert_eq!(receipt.status, SendStatus::Accepted);
     }
 
     #[test]
@@ -1215,10 +1131,10 @@ routes:
         envelope.message = "hello fake opencode".to_string();
         envelope.cwd = Some("/home/andy/nixos".to_string());
 
-        let receipt = backend.inject(envelope).await.unwrap();
+        let receipt = backend.send(envelope).await.unwrap();
 
         assert_eq!(receipt.backend, BackendKind::OpenCode);
-        assert_eq!(receipt.status, InjectionStatus::Queued);
+        assert_eq!(receipt.status, SendStatus::Accepted);
         assert_eq!(receipt.session_id.as_deref(), Some("ses-new"));
         server.await.unwrap();
     }
@@ -1242,9 +1158,9 @@ routes:
         envelope.backend = BackendKind::OpenCode;
         envelope.cwd = Some("/home/andy/nixos".to_string());
 
-        let result = tokio::time::timeout(Duration::from_secs(1), backend.inject(envelope))
+        let result = tokio::time::timeout(Duration::from_secs(1), backend.send(envelope))
             .await
-            .expect("OpenCode injection should return before outer test timeout");
+            .expect("OpenCode send should return before outer test timeout");
 
         assert!(result.is_err());
         server.abort();
@@ -1319,39 +1235,8 @@ routes:
         );
     }
 
-    #[test]
-    fn reads_codex_turn_ids_and_status() {
-        let turn = json!({
-            "turn": {
-                "id": "turn-1",
-                "status": "completed"
-            }
-        });
-        let notification = json!({
-            "method": "turn/completed",
-            "params": {
-                "threadId": "thread-1",
-                "turn": {
-                    "id": "turn-1",
-                    "status": "completed"
-                }
-            }
-        });
-
-        assert_eq!(CodexBackend::turn_id(&turn).as_deref(), Some("turn-1"));
-        assert_eq!(
-            CodexBackend::turn_id(&notification).as_deref(),
-            Some("turn-1")
-        );
-        assert_eq!(CodexBackend::turn_status(&notification), Some("completed"));
-        assert_eq!(
-            CodexBackend::notification_thread_id(&notification),
-            Some("thread-1")
-        );
-    }
-
     #[tokio::test]
-    async fn codex_backend_completes_turn_against_fake_server() {
+    async fn codex_backend_submits_turn_against_fake_server() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let server = tokio::spawn(async move {
@@ -1414,29 +1299,13 @@ routes:
                 }),
             )
             .await;
-            send_ws_json(
-                &mut ws,
-                json!({
-                    "jsonrpc": "2.0",
-                    "method": "turn/completed",
-                    "params": {
-                        "threadId": "thread-1",
-                        "turn": {
-                            "id": "turn-1",
-                            "status": "completed"
-                        }
-                    }
-                }),
-            )
-            .await;
         });
 
-        let mut backend = CodexBackend::new(format!("ws://{addr}"));
-        backend.completion_timeout = Duration::from_secs(5);
-        let receipt = backend.inject(envelope()).await.unwrap();
+        let backend = CodexBackend::new(format!("ws://{addr}"));
+        let receipt = backend.send(envelope()).await.unwrap();
 
         assert_eq!(receipt.backend, BackendKind::Codex);
-        assert_eq!(receipt.status, InjectionStatus::Completed);
+        assert_eq!(receipt.status, SendStatus::Accepted);
         assert_eq!(receipt.thread_id.as_deref(), Some("thread-1"));
         server.await.unwrap();
     }
@@ -1455,7 +1324,7 @@ routes:
 
         let mut backend = CodexBackend::new(format!("ws://{addr}"));
         backend.transport_timeout = Duration::from_millis(20);
-        let error = backend.inject(envelope()).await.unwrap_err().to_string();
+        let error = backend.send(envelope()).await.unwrap_err().to_string();
 
         assert!(error.contains("timed out waiting for JSON-RPC response id 1"));
         server.abort();
@@ -1482,17 +1351,17 @@ routes:
     fn models_capabilities_and_lossy_zellij_handles() {
         let opencode = BackendCapabilities::for_kind(BackendKind::OpenCode);
         assert!(!opencode.preserves_role);
-        assert!(!opencode.has_completion_readback);
+        assert!(opencode.has_delivery_receipt);
         assert!(!opencode.is_lossy);
 
         let codex = BackendCapabilities::for_kind(BackendKind::Codex);
         assert!(!codex.preserves_role);
-        assert!(codex.has_completion_readback);
+        assert!(codex.has_delivery_receipt);
         assert!(!codex.is_lossy);
 
         let zellij = BackendCapabilities::for_kind(BackendKind::Zellij);
         assert!(!zellij.preserves_role);
-        assert!(!zellij.has_completion_readback);
+        assert!(!zellij.has_delivery_receipt);
         assert!(zellij.is_lossy);
 
         let handle = TargetHandle::Zellij {

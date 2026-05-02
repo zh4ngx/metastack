@@ -193,8 +193,11 @@ struct TaskResult {
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = env::args().skip(1).collect::<Vec<_>>();
+    if args.first().is_some_and(|arg| arg == "send") {
+        return send_command(&args[1..]).await;
+    }
     if args.first().is_some_and(|arg| arg == "inject") {
-        return inject_command(&args[1..]).await;
+        bail!("metastack inject has been renamed; use metastack send");
     }
 
     let path = args
@@ -248,24 +251,24 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-async fn inject_command(args: &[String]) -> Result<()> {
+async fn send_command(args: &[String]) -> Result<()> {
     let config_path = args
         .first()
-        .context("usage: metastack inject <routing-config.yaml> <target> <message...>")?;
+        .context("usage: metastack send <routing-config.yaml> <target> <message...>")?;
     let target = args
         .get(1)
-        .context("usage: metastack inject <routing-config.yaml> <target> <message...>")?;
+        .context("usage: metastack send <routing-config.yaml> <target> <message...>")?;
     let message = args
         .get(2..)
         .filter(|parts| !parts.is_empty())
-        .context("usage: metastack inject <routing-config.yaml> <target> <message...>")?
+        .context("usage: metastack send <routing-config.yaml> <target> <message...>")?
         .join(" ");
     let origin = env::var("USER").unwrap_or_else(|_| "metastack".to_string());
     let receipt =
-        routing::inject_from_config_path(Path::new(config_path), target, message, origin).await?;
+        routing::send_from_config_path(Path::new(config_path), target, message, origin).await?;
 
     println!(
-        "injected backend={:?} target={} status={:?} correlation_id={}",
+        "sent backend={:?} target={} status={:?} correlation_id={}",
         receipt.backend, receipt.target, receipt.status, receipt.correlation_id
     );
     Ok(())

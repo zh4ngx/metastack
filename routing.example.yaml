@@ -13,12 +13,6 @@ backends:
     approval_policy: never
     sandbox_policy:
       type: dangerFullAccess
-
-  zellij:
-    type: zellij
-    mcp_binary: /home/andy/dev/zellij-mcp/target/debug/zellij-mcp
-    session: main
-
 agents:
   vault-oc:
     backend: opencode
@@ -27,6 +21,3 @@ agents:
   nixos-cx:
     backend: codex
     cwd: /home/andy/nixos
-
-routes:
-  default_reply_to: caller

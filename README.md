@@ -57,17 +57,17 @@ nix develop -c cargo run -- metastack.yaml /tmp/metastack-output
 nix build
 ```
 
-Structured injection prototype:
+Structured send prototype:
 
 ```bash
-cargo run -- inject routing.example.yaml nixos-cx "status update"
+cargo run -- send routing.example.yaml nixos-cx "status update"
 ```
 
 For this prototype, OpenCode targets require `opencode-serve` on
 `127.0.0.1:4096` with a session whose `directory` matches the target `cwd`.
 Codex targets require a `cx`/Codex app-server session on `127.0.0.1:4107` with
 a matching active or newest CLI thread. Claude/Huddle and zellij fallback are
-documented contracts, not active `metastack inject` adapters yet.
+documented contracts, not active `metastack send` adapters yet.
 
 For the DAG runner, the first positional argument is the config path. If
 omitted, it defaults to `./metastack.yaml`.
@@ -184,10 +184,10 @@ should stay a small portable runtime that consumes a rendered config file.
 
 YAML remains the fallback and lowest-level format.
 
-## Structured Injection Roadmap
+## Structured Send Roadmap
 
 The v0.3 branch introduces a routing prototype beside the existing DAG runner.
-The routing layer uses one common envelope and backend-specific adapters:
+The routing layer uses one internal envelope and backend-specific adapters:
 
 ```text
 OpenCode -> HTTP prompt_async
@@ -196,10 +196,10 @@ Claude   -> Huddle channel bridge
 Zellij   -> lossy keystroke fallback
 ```
 
-`metastack inject <routing-config.yaml> <target> <message...>` is the prototype
+`metastack send <routing-config.yaml> <target> <message...>` is the prototype
 entry point for sending one user-message turn through a configured target.
-OpenCode and Codex are the first concrete adapters; Claude/Huddle and zellij
-fallback are documented as backend contracts for follow-up work.
+OpenCode and Codex are the first concrete adapters; Claude/Huddle and lossy
+terminal fallback are documented as backend contracts for follow-up work.
 The CLI carries correlation metadata internally, but reply routing is still
 roadmap work.
 
