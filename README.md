@@ -74,8 +74,8 @@ nix profile install .
 With Nix from GitHub:
 
 ```bash
-nix run github:zh4ngx/metastack/v0.8.3 -- <args>
-nix profile install github:zh4ngx/metastack/v0.8.3
+nix run github:zh4ngx/metastack/v0.9.0 -- <args>
+nix profile install github:zh4ngx/metastack/v0.9.0
 ```
 
 Declarative NixOS/Home Manager users can add the flake package to
@@ -86,7 +86,7 @@ For a flake-based NixOS or Home Manager config, add the input:
 
 ```nix
 {
-  inputs.metastack.url = "github:zh4ngx/metastack/v0.8.3";
+  inputs.metastack.url = "github:zh4ngx/metastack/v0.9.0";
 }
 ```
 
@@ -115,7 +115,7 @@ For Home Manager:
 With Cargo:
 
 ```bash
-cargo install --git https://github.com/zh4ngx/metastack.git --tag v0.8.3 --locked
+cargo install --git https://github.com/zh4ngx/metastack.git --tag v0.9.0 --locked
 ```
 
 From a local checkout:
@@ -180,7 +180,8 @@ For structured send:
 - Claude/Huddle targets need the `huddle` CLI, the `huddled` daemon, and a
   channel-enabled Claude Code session launched through `coh` or equivalent
 - OpenCode and Codex target `cwd` values in the discovered or explicit routing
-  config must match an active/newest backend session or thread
+  config must match exactly one backend session or thread unless
+  `session_id`/`thread_id` is pinned
 
 `metastack` does not start these backend services. In Andy's local agent setup,
 running `oc` from a project root starts or attaches to `opencode-serve`, and
@@ -334,9 +335,12 @@ agents:
     member: claude-member-name
 ```
 
-OpenCode validates any configured `session_id` against the target `cwd`, then
-returns after HTTP `prompt_async` acceptance. Codex validates any configured
-`thread_id` against target `cwd` metadata and CLI source, then returns after the
+OpenCode validates any configured `session_id` against the target `cwd`. Without
+a configured `session_id`, implicit discovery requires exactly one matching
+candidate session and fails closed if multiple sessions share the same `cwd`.
+Codex behaves the same way for `thread_id`: configured ids are validated against
+target `cwd` metadata and CLI source, while implicit discovery requires exactly
+one candidate CLI thread after active-thread preference. Codex returns after the
 app-server accepts `turn/start`. Production `cx` sessions are stateful WebSocket
 conversations with item, delta, and completion events; this prototype only
 submits one turn and waits for acceptance.
@@ -407,7 +411,8 @@ cargo run -- send ~/.config/metastack/routing.yaml local-codex "status update"
 OpenCode targets require `opencode-serve` on
 `127.0.0.1:4096` with a session whose `directory` matches the target `cwd`.
 Codex targets require a `cx`/Codex app-server session on `127.0.0.1:4107` with
-a matching active or newest CLI thread. Claude/Huddle targets require
+a single matching CLI thread, or an explicit `thread_id`. Claude/Huddle targets
+require
 `huddle send` and a channel-enabled `coh` session.
 
 For the DAG runner, the first positional argument is the config path. If

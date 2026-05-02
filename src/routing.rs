@@ -621,7 +621,7 @@ impl OpenCodeBackend {
     pub fn select_session<'a>(
         sessions: &'a [OpenCodeSession],
         cwd: &str,
-    ) -> Option<&'a OpenCodeSession> {
+    ) -> Result<Option<&'a OpenCodeSession>> {
         let matching = sessions
             .iter()
             .filter(|session| session.directory.as_deref() == Some(cwd))
@@ -637,9 +637,13 @@ impl OpenCodeBackend {
             top_level
         };
 
-        candidates
-            .into_iter()
-            .max_by_key(|session| session.updated_sort_key())
+        match candidates.as_slice() {
+            [] => Ok(None),
+            [session] => Ok(Some(*session)),
+            _ => bail!(
+                "multiple OpenCode sessions found for cwd {cwd}; configure session_id explicitly"
+            ),
+        }
     }
 
     async fn list_sessions_for_cwd(&self, cwd: &str) -> Result<Vec<OpenCodeSession>> {
@@ -656,7 +660,7 @@ impl OpenCodeBackend {
 
     async fn discover_session(&self, cwd: &str) -> Result<String> {
         let sessions = self.list_sessions_for_cwd(cwd).await?;
-        Self::select_session(&sessions, cwd)
+        Self::select_session(&sessions, cwd)?
             .map(|session| session.id.clone())
             .with_context(|| format!("no OpenCode session found for cwd {cwd}"))
     }
@@ -1028,32 +1032,61 @@ impl CodexBackend {
     }
 
     pub fn select_thread(value: &Value) -> Option<String> {
-        Self::select_thread_ref(value, None).map(|thread| thread.id)
+        Self::select_thread_ref(value, None)
+            .ok()
+            .flatten()
+            .map(|thread| thread.id)
     }
 
     fn select_thread_for_cwd(value: &Value, cwd: &str) -> Option<String> {
-        Self::select_thread_ref(value, Some(cwd)).map(|thread| thread.id)
+        Self::select_thread_ref(value, Some(cwd))
+            .ok()
+            .flatten()
+            .map(|thread| thread.id)
     }
 
-    fn select_thread_ref(value: &Value, cwd: Option<&str>) -> Option<CodexThreadRef> {
-        let threads = Self::thread_items(value)?;
+    fn select_thread_ref(value: &Value, cwd: Option<&str>) -> Result<Option<CodexThreadRef>> {
+        let Some(threads) = Self::thread_items(value) else {
+            return Ok(None);
+        };
 
         let matching_threads = Self::threads_matching_cwd(threads.as_slice(), cwd);
-        let newest_cli = matching_threads.iter().copied().find(|thread| {
-            Self::thread_source_is_cli(thread) && Self::thread_status(thread) == Some("active")
-        });
+        let active_cli = matching_threads
+            .iter()
+            .copied()
+            .filter(|thread| {
+                Self::thread_source_is_cli(thread) && Self::thread_status(thread) == Some("active")
+            })
+            .collect::<Vec<_>>();
+        if !active_cli.is_empty() {
+            return Self::unique_implicit_thread(active_cli, cwd);
+        }
 
-        newest_cli
-            .or_else(|| {
-                matching_threads
-                    .iter()
-                    .copied()
-                    .find(|thread| Self::thread_source_is_cli(thread))
-            })
-            .and_then(|thread| {
-                let id = Self::thread_id(thread)?;
-                Some(Self::thread_ref(thread, id))
-            })
+        let cli = matching_threads
+            .iter()
+            .copied()
+            .filter(|thread| Self::thread_source_is_cli(thread))
+            .collect::<Vec<_>>();
+        Self::unique_implicit_thread(cli, cwd)
+    }
+
+    fn unique_implicit_thread(
+        candidates: Vec<&Value>,
+        cwd: Option<&str>,
+    ) -> Result<Option<CodexThreadRef>> {
+        match candidates.as_slice() {
+            [] => Ok(None),
+            [thread] => {
+                let id = Self::thread_id(thread).context("Codex CLI thread missing id")?;
+                Ok(Some(Self::thread_ref(thread, id)))
+            }
+            _ => match cwd {
+                Some(cwd) => bail!(
+                    "multiple Codex CLI threads found for cwd {cwd}; configure thread_id explicitly"
+                ),
+                None => bail!("multiple Codex CLI threads found; configure thread_id explicitly"),
+            },
+        }
     }
 
     fn select_thread_ref_by_id(
@@ -1188,7 +1221,7 @@ impl SendBackend for CodexBackend {
                     || format!("configured Codex thread_id {thread_id} not found for cwd {cwd}"),
                 )?
             } else {
-                Self::select_thread_ref(&response, Some(cwd))
+                Self::select_thread_ref(&response, Some(cwd))?
                     .with_context(|| format!("no Codex CLI thread found for cwd {cwd}"))?
             };
             let thread_id = thread.id;
@@ -1880,15 +1913,8 @@ routes:
     }
 
     #[test]
-    fn selects_newest_opencode_session_for_cwd() {
+    fn selects_unique_opencode_session_for_cwd() {
         let sessions = vec![
-            OpenCodeSession {
-                id: "old".to_string(),
-                directory: Some("/home/andy/nixos".to_string()),
-                updated_at: Some("2026-05-01T00:00:00Z".to_string()),
-                parent_id: None,
-                time: None,
-            },
             OpenCodeSession {
                 id: "other".to_string(),
                 directory: Some("/home/andy/vault".to_string()),
@@ -1907,9 +1933,37 @@ routes:
 
         assert_eq!(
             OpenCodeBackend::select_session(&sessions, "/home/andy/nixos")
+                .unwrap()
                 .map(|session| session.id.as_str()),
             Some("new")
         );
+    }
+
+    #[test]
+    fn opencode_session_discovery_rejects_ambiguous_top_level_sessions() {
+        let sessions = vec![
+            OpenCodeSession {
+                id: "old".to_string(),
+                directory: Some("/home/andy/nixos".to_string()),
+                updated_at: Some("2026-05-01T00:00:00Z".to_string()),
+                parent_id: None,
+                time: None,
+            },
+            OpenCodeSession {
+                id: "new".to_string(),
+                directory: Some("/home/andy/nixos".to_string()),
+                updated_at: Some("2026-05-01T03:00:00Z".to_string()),
+                parent_id: None,
+                time: None,
+            },
+        ];
+
+        let error = OpenCodeBackend::select_session(&sessions, "/home/andy/nixos")
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("multiple OpenCode sessions"));
+        assert!(error.contains("session_id"));
     }
 
     #[test]
@@ -1931,13 +1985,14 @@ routes:
 
         assert_eq!(
             OpenCodeBackend::select_session(&sessions, "/home/andy")
+                .unwrap()
                 .map(|session| session.id.as_str()),
             Some("parent")
         );
     }
 
     #[test]
-    fn opencode_session_discovery_falls_back_when_only_child_sessions_match() {
+    fn opencode_session_discovery_rejects_ambiguous_child_sessions() {
         let sessions: Vec<OpenCodeSession> = serde_json::from_value(json!([
             {
                 "id": "old-child",
@@ -1954,15 +2009,16 @@ routes:
         ]))
         .unwrap();
 
-        assert_eq!(
-            OpenCodeBackend::select_session(&sessions, "/home/andy")
-                .map(|session| session.id.as_str()),
-            Some("new-child")
-        );
+        let error = OpenCodeBackend::select_session(&sessions, "/home/andy")
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("multiple OpenCode sessions"));
+        assert!(error.contains("session_id"));
     }
 
     #[test]
-    fn selects_newest_opencode_session_from_live_time_shape() {
+    fn opencode_session_discovery_rejects_ambiguous_live_time_shape() {
         let sessions: Vec<OpenCodeSession> = serde_json::from_value(json!([
             {
                 "id": "old",
@@ -1977,11 +2033,12 @@ routes:
         ]))
         .unwrap();
 
-        assert_eq!(
-            OpenCodeBackend::select_session(&sessions, "/home/andy/nixos")
-                .map(|session| session.id.as_str()),
-            Some("new")
-        );
+        let error = OpenCodeBackend::select_session(&sessions, "/home/andy/nixos")
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("multiple OpenCode sessions"));
+        assert!(error.contains("session_id"));
     }
 
     #[tokio::test]
@@ -1994,11 +2051,6 @@ routes:
             assert!(request.starts_with("GET /session?directory=%2Fhome%2Fandy%2Fnixos "));
 
             let body = serde_json::to_string(&json!([
-                {
-                    "id": "ses-old",
-                    "directory": "/home/andy/nixos",
-                    "time": {"updated": 1}
-                },
                 {
                     "id": "ses-new",
                     "directory": "/home/andy/nixos",
@@ -2027,6 +2079,43 @@ routes:
         assert_eq!(receipt.backend, BackendKind::OpenCode);
         assert_eq!(receipt.status, SendStatus::Accepted);
         assert_eq!(receipt.session_id.as_deref(), Some("ses-new"));
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn opencode_backend_rejects_ambiguous_session_discovery() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let request = read_http_request(&mut stream).await;
+            assert!(request.starts_with("GET /session?directory=%2Fhome%2Fandy%2Fnixos "));
+
+            let body = serde_json::to_string(&json!([
+                {
+                    "id": "ses-a",
+                    "directory": "/home/andy/nixos",
+                    "time": {"updated": 1}
+                },
+                {
+                    "id": "ses-b",
+                    "directory": "/home/andy/nixos",
+                    "time": {"updated": 2}
+                }
+            ]))
+            .unwrap();
+            write_http_response(&mut stream, 200, Some(&body)).await;
+        });
+
+        let backend = OpenCodeBackend::new(format!("http://{addr}"));
+        let mut envelope = envelope();
+        envelope.backend = BackendKind::OpenCode;
+        envelope.cwd = Some("/home/andy/nixos".to_string());
+
+        let error = backend.send(envelope).await.unwrap_err().to_string();
+
+        assert!(error.contains("multiple OpenCode sessions"));
+        assert!(error.contains("session_id"));
         server.await.unwrap();
     }
 
@@ -2224,6 +2313,86 @@ routes:
             CodexBackend::select_thread_for_cwd(&response, "/home/andy/nixos").as_deref(),
             Some("matching-idle-cli")
         );
+    }
+
+    #[test]
+    fn codex_thread_selection_rejects_ambiguous_active_cli_threads() {
+        let response = json!({
+            "data": [
+                {
+                    "id": "active-a",
+                    "cwd": "/home/andy/nixos",
+                    "source": "cli",
+                    "status": {"type": "active"}
+                },
+                {
+                    "id": "active-b",
+                    "cwd": "/home/andy/nixos",
+                    "source": "cli",
+                    "status": {"type": "active"}
+                }
+            ]
+        });
+
+        let error = CodexBackend::select_thread_ref(&response, Some("/home/andy/nixos"))
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("multiple Codex CLI threads"));
+        assert!(error.contains("thread_id"));
+    }
+
+    #[test]
+    fn codex_thread_selection_rejects_ambiguous_idle_cli_threads() {
+        let response = json!({
+            "data": [
+                {
+                    "id": "idle-a",
+                    "cwd": "/home/andy/nixos",
+                    "source": "cli",
+                    "status": {"type": "idle"}
+                },
+                {
+                    "id": "idle-b",
+                    "cwd": "/home/andy/nixos",
+                    "source": "cli",
+                    "status": {"type": "idle"}
+                }
+            ]
+        });
+
+        let error = CodexBackend::select_thread_ref(&response, Some("/home/andy/nixos"))
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("multiple Codex CLI threads"));
+        assert!(error.contains("thread_id"));
+    }
+
+    #[test]
+    fn codex_thread_selection_prefers_single_active_cli_thread() {
+        let response = json!({
+            "data": [
+                {
+                    "id": "idle-cli",
+                    "cwd": "/home/andy/nixos",
+                    "source": "cli",
+                    "status": {"type": "idle"}
+                },
+                {
+                    "id": "active-cli",
+                    "cwd": "/home/andy/nixos",
+                    "source": "cli",
+                    "status": {"type": "active"}
+                }
+            ]
+        });
+
+        let selected = CodexBackend::select_thread_ref(&response, Some("/home/andy/nixos"))
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(selected.id, "active-cli");
     }
 
     #[test]
@@ -2501,6 +2670,68 @@ routes:
 
         assert_eq!(receipt.status, SendStatus::Accepted);
         assert_eq!(receipt.thread_id.as_deref(), Some("thread-1"));
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn codex_backend_rejects_ambiguous_thread_discovery_before_resume() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+
+            let request = next_ws_json(&mut ws).await.unwrap();
+            assert_eq!(request["method"], "initialize");
+            assert_eq!(request["id"], 1);
+            send_ws_json(&mut ws, json!({"jsonrpc": "2.0", "id": 1, "result": {}})).await;
+
+            let notification = next_ws_json(&mut ws).await.unwrap();
+            assert_eq!(notification["method"], "initialized");
+
+            let request = next_ws_json(&mut ws).await.unwrap();
+            assert_eq!(request["method"], "thread/list");
+            assert_eq!(request["id"], 2);
+            assert_eq!(request["params"]["cwd"], "/home/andy/nixos");
+            send_ws_json(
+                &mut ws,
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": 2,
+                    "result": {
+                        "data": [
+                            {
+                                "id": "thread-a",
+                                "cwd": "/home/andy/nixos",
+                                "source": "cli",
+                                "status": {"type": "active"}
+                            },
+                            {
+                                "id": "thread-b",
+                                "cwd": "/home/andy/nixos",
+                                "source": "cli",
+                                "status": {"type": "active"}
+                            }
+                        ]
+                    }
+                }),
+            )
+            .await;
+
+            let next = tokio::time::timeout(Duration::from_millis(50), next_ws_json(&mut ws)).await;
+            if let Ok(Ok(value)) = next {
+                panic!(
+                    "unexpected Codex request after ambiguous discovery: {}",
+                    value
+                );
+            }
+        });
+
+        let backend = CodexBackend::new(format!("ws://{addr}"));
+        let error = backend.send(envelope()).await.unwrap_err().to_string();
+
+        assert!(error.contains("multiple Codex CLI threads"));
+        assert!(error.contains("thread_id"));
         server.await.unwrap();
     }
 

@@ -137,6 +137,9 @@ The current prototype is narrower than the full envelope:
 - OpenCode, Codex, and Claude/Huddle are the implemented prototype adapters.
 - zellij fallback remains a design contract/stub until its addressing and reply
   semantics are precise.
+- OpenCode and Codex implicit discovery fail closed when a target `cwd` matches
+  multiple candidate sessions or threads. Pin `session_id` or `thread_id` for
+  stable routing in shared project roots.
 - Codex opens a WebSocket per prototype send, validates configured thread ids
   against target `cwd` metadata and CLI source, and waits for the
   `turn/start` JSON-RPC response. It does not wait for agent turn completion.
@@ -234,11 +237,12 @@ The request body is:
 }
 ```
 
-Target discovery should pass `directory=<cwd>` to the session route, then
-prefer the newest top-level session whose `directory` matches the target project
-root. If only child sessions match, discovery can fall back to the newest child
-session. Callers can pin `session_id` explicitly, but MetaStack still validates
-that configured id against the cwd-filtered session list before posting.
+Target discovery should pass `directory=<cwd>` to the session route, then select
+exactly one top-level session whose `directory` matches the target project root.
+If no top-level sessions match, discovery can use exactly one child session. If
+multiple candidates remain, discovery fails closed and the caller must pin
+`session_id` explicitly. MetaStack still validates configured ids against the
+cwd-filtered session list before posting.
 Delivery returns before the agent finishes; OpenCode does not provide completion
 readback through this primitive.
 
@@ -257,7 +261,7 @@ connect WebSocket
 initialize with experimentalApi
 send initialized notification
 thread/list filtered by cwd
-select active CLI thread, or validate configured thread_id
+select exactly one active CLI thread, or validate configured thread_id
 thread/resume to load the thread and attach this socket for events
 turn/start
 wait for the turn/start JSON-RPC response
@@ -268,7 +272,9 @@ Codex is not identical to fire-and-forget HTTP: MetaStack waits for the
 It intentionally does not keep the socket open for agent completion in the
 prototype. A configured `thread_id` still goes through `thread/list` first so
 MetaStack can reject ids that the app-server reports under a different cwd, with
-no cwd metadata, or from a non-CLI source.
+no cwd metadata, or from a non-CLI source. Without a configured `thread_id`,
+implicit discovery prefers active CLI threads, but still requires exactly one
+candidate in the selected priority class; multiple candidates fail closed.
 
 Codex input is an array of user input objects:
 

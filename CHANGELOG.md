@@ -1,5 +1,15 @@
 # Changelog
 
+## v0.9.0 - 2026-05-02
+
+- Fail closed for implicit OpenCode session discovery when a target `cwd`
+  matches multiple candidate sessions. Configure `session_id` to disambiguate.
+- Fail closed for implicit Codex thread discovery when a target `cwd` matches
+  multiple candidate CLI threads in the selected priority class. Configure
+  `thread_id` to disambiguate.
+- Compatibility: routing configs that relied on newest-session or first-thread
+  implicit selection with multiple live candidates now fail until pinned.
+
 ## v0.8.3 - 2026-05-02
 
 - Start each DAG task's timeout budget after provider rate-limit acquisition,
