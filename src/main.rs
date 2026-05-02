@@ -832,6 +832,15 @@ tasks:
     }
 
     #[test]
+    fn smoke_test_example_yaml_stays_parseable() {
+        let config: Config = serde_yml::from_str(include_str!("../smoke-test.example.yaml"))
+            .expect("smoke-test.example.yaml should parse");
+
+        assert_eq!(config.mcp_binary, "zellij-mcp");
+        assert!(validate(&config).is_ok());
+    }
+
+    #[test]
     fn extracts_text_from_simple_and_mcp_tool_result_formats() {
         let simple = json!({"text": "plain output"});
         assert_eq!(extract_text(&simple).as_deref(), Some("plain output"));

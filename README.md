@@ -1,34 +1,243 @@
 # metastack
 
-`metastack` is a small CLI DAG orchestrator over `zellij-mcp`.
+`metastack` is a small CLI with two surfaces: a DAG runner over `zellij-mcp`
+and a structured send prototype for routing one message turn to an existing
+agent session.
 
-It is not an MCP server. A human or agent runs `metastack` from a shell, and
-`metastack` starts the configured `zellij-mcp` binary as a child process. It
-then acts as an MCP client, using a small subset of the `zellij-mcp` tool
-surface, primarily `spawn-pane`, `send-text`, and `read-pane`, to run tasks in
-zellij panes.
+It is not an MCP server. In DAG mode, a human or agent runs `metastack` from a
+shell, and `metastack` starts the configured `zellij-mcp` binary as a child
+process. It then acts as an MCP client, using a small subset of the
+`zellij-mcp` tool surface, primarily `spawn-pane`, `send-text`, and
+`read-pane`, to run DAG tasks in zellij panes. In structured-send mode,
+`metastack` talks directly to configured backend services.
 
-## Runtime Model
+## Status
 
-```text
-human or agent shell
-  runs metastack
-    reads metastack.yaml
-    starts zellij-mcp from mcp_binary
-    initializes as an MCP client
-    spawns zellij panes for ready tasks
-    sends each task prompt into its pane
-    polls pane output for completion sentinels
-    writes task artifacts
+`metastack` currently has two CLI modes:
+
+| Mode | Command | Status | Runtime requirements |
+| --- | --- | --- | --- |
+| DAG runner | `metastack [config] [output-dir]` | implemented | `zellij`, `zellij-mcp`, configured providers |
+| Structured send | `metastack send <routing-config> <target> <message...>` | prototype | OpenCode serve or Codex app-server target |
+
+Structured send support:
+
+| Backend | Status | Notes |
+| --- | --- | --- |
+| OpenCode | implemented prototype | sends one user-message turn through `prompt_async`; no reply routing yet |
+| Codex | implemented prototype | starts one user-message turn through the app-server WebSocket; no reply routing yet |
+| Claude/Huddle | planned | documented contract only |
+| zellij fallback | planned | documented lossy fallback only |
+
+For routing topology, internal envelopes, and protocol semantics, see
+[ARCHITECTURE.md](./ARCHITECTURE.md).
+
+## Vocabulary
+
+- `send`: public CLI action that submits one user-message turn to a concrete
+  target.
+- `route`: policy/resolution layer for choosing where a message should go.
+  Today the CLI takes an already-resolved target.
+- `inject`: retired public name. It is reserved for backend-specific transcript
+  mutation if that ever becomes useful.
+
+## Install
+
+With Nix from this repository:
+
+```bash
+nix run . -- <args>
+nix build .
+./result/bin/metastack <args>
+nix profile install .
 ```
 
-Tasks are scheduled as a dependency graph. `depends-on` edges are validated and
-topo-sorted before execution, and each provider has a token bucket so concurrent
-work can be rate-limited per provider.
+With Nix from GitHub:
 
-After the DAG scheduler completes, `metastack` keeps polling spawned panes with
-`wait_for_spawned_panes()` so the parent process does not exit before remaining
-task output has been captured.
+```bash
+nix run github:zh4ngx/metastack -- <args>
+nix profile install github:zh4ngx/metastack
+```
+
+Declarative NixOS/Home Manager users can add the flake package to
+`environment.systemPackages` or `home.packages`. There is no
+`programs.metastack` module yet.
+
+With Cargo:
+
+```bash
+cargo install --git https://github.com/zh4ngx/metastack.git --locked
+```
+
+From a local checkout:
+
+```bash
+cargo run -- <args>
+cargo install --path . --locked
+```
+
+There is not yet a crates.io release, Homebrew formula, or prebuilt binary
+release.
+
+The Nix package installs only the `metastack` binary. It does not install
+`zellij`, `zellij-mcp`, OpenCode, Codex, Claude, or any provider commands used
+by your YAML config.
+
+## Prerequisites
+
+For the DAG runner:
+
+- `zellij`
+- a separately installed or built `zellij-mcp` binary, referenced by
+  `mcp_binary` in the config
+- any provider commands you put in the config, such as `sh`, `codex`, `claude`,
+  or another agent CLI
+
+Run the DAG runner from inside a zellij session, or set `session` in the config
+to the name of an existing zellij session. If `session` is omitted,
+`metastack` uses `ZELLIJ_SESSION_NAME` when that environment variable is
+available.
+
+`zellij-mcp` is not vendored here. Build or install it from the `zellij-mcp`
+project, then put the binary on `PATH` as `zellij-mcp` or set `mcp_binary` to
+its absolute path. The DAG smoke test will fail until this binary is available.
+
+For structured send:
+
+- OpenCode targets need `opencode-serve` listening on `127.0.0.1:4096`
+- Codex targets need `codex-app-server` listening on `127.0.0.1:4107`
+- target `cwd` values in the routing config must match an active/newest backend
+  session or thread
+
+`metastack` does not start these backend services. In Andy's local agent setup,
+running `oc` from a project root starts or attaches to `opencode-serve`, and
+running `cx` from a project root starts or attaches to `codex-app-server`.
+Outside that setup, start the equivalent services from those projects and
+adjust the URLs in the routing config.
+
+For development without Nix, use a recent stable Rust toolchain that supports
+the Rust 2024 edition.
+
+## Configuration Files
+
+For installed structured-send use, the intended routing config path is:
+
+```text
+~/.config/metastack/routing.yaml
+```
+
+The repository's `routing.example.yaml` is a shape example with Andy-local
+targets. Copy its structure, but replace `cwd`, ports, model settings, approval
+policy, and sandbox policy for your environment.
+
+The DAG runner reads the first positional argument as its config path. If that
+argument is omitted, it defaults to `./metastack.yaml`.
+
+## DAG Smoke Test
+
+The repository includes `smoke-test.example.yaml`, a minimal config with no
+local machine paths:
+
+```yaml
+mcp_binary: zellij-mcp
+startup_delay: 0.2
+poll_interval: 0.2
+timeout: 10
+providers:
+  shell:
+    command: [sh]
+    prompt_mode: shell
+    capacity: 1
+    refill_per_sec: 1
+tasks:
+  - name: hello
+    provider: shell
+    prompt: echo hello from metastack
+```
+
+Run it from inside zellij:
+
+```bash
+metastack smoke-test.example.yaml /tmp/metastack-output
+```
+
+Expected success shape:
+
+- the command exits successfully
+- `/tmp/metastack-output/metastack-hello.txt` is written
+- the artifact contains `hello from metastack` and a completion sentinel
+
+Common setup failures:
+
+- `failed to spawn MCP binary zellij-mcp`: install/build `zellij-mcp` or edit
+  `mcp_binary`
+- zellij session errors: run from inside zellij or set `session`
+- provider command errors: make sure `sh` or your chosen provider command is on
+  `PATH`
+
+If `zellij-mcp` is not on `PATH`, edit `mcp_binary` to point at your local
+binary. Provider commands are resolved from the `metastack` process environment,
+so `command: [sh]` requires `sh` to be available there.
+
+The checked-in `metastack.yaml` is a development example and still contains
+Andy-local paths. Use it as a configuration reference, not as the cold-start
+smoke test.
+
+## Structured Send Prototype
+
+The structured send prototype sends one user-message turn through an already
+running backend service. It returns after backend acceptance, not after the
+target agent completes work or replies:
+
+```bash
+metastack send ~/.config/metastack/routing.yaml local-codex "status update"
+```
+
+Minimal generic routing config:
+
+```yaml
+version: 2
+
+backends:
+  opencode:
+    type: opencode
+    base_url: http://127.0.0.1:4096
+
+  codex:
+    type: codex
+    url: ws://127.0.0.1:4107
+    model: gpt-5.5
+    effort: xhigh
+    approval_policy: never
+    sandbox_policy:
+      type: dangerFullAccess
+
+agents:
+  local-opencode:
+    backend: opencode
+    cwd: /path/to/project
+
+  local-codex:
+    backend: codex
+    cwd: /path/to/project
+```
+
+OpenCode returns after HTTP `prompt_async` acceptance. Codex returns after the
+app-server accepts `turn/start`. Production `cx` sessions are stateful
+WebSocket conversations with item, delta, and completion events; this prototype
+only submits one turn and waits for acceptance.
+
+Claude/Huddle and zellij fallback targets may parse as config concepts, but
+`metastack send` currently returns explicit "not implemented" errors for them.
+
+## Safety
+
+Do not run untrusted configs. DAG configs can spawn arbitrary provider commands
+in zellij panes. Structured send configs can target existing agent sessions and
+set Codex approval/sandbox policy. The generic Codex example above mirrors this
+project's current local default of `approval_policy: never` with
+`dangerFullAccess`; change those settings before using it in a more restrictive
+environment.
 
 ## When To Use It
 
@@ -42,28 +251,30 @@ general process pool. Panes make long-running work visible, persistent across SS
 disconnects, and inspectable by a human or another agent while the DAG is still
 running.
 
-## Running
+## Running From Source
 
 With Rust tooling available:
 
 ```bash
-cargo run -- metastack.yaml /tmp/metastack-output
+cargo run -- smoke-test.example.yaml /tmp/metastack-output
 ```
 
 With the Nix flake:
 
 ```bash
-nix develop -c cargo run -- metastack.yaml /tmp/metastack-output
-nix build
+nix run . -- smoke-test.example.yaml /tmp/metastack-output
+nix develop -c cargo run -- smoke-test.example.yaml /tmp/metastack-output
+nix build .
 ```
 
 Structured send prototype:
 
 ```bash
-cargo run -- send routing.example.yaml nixos-cx "status update"
+cargo run -- send ~/.config/metastack/routing.yaml local-codex "status update"
+nix run . -- send ~/.config/metastack/routing.yaml local-codex "status update"
 ```
 
-For this prototype, OpenCode targets require `opencode-serve` on
+OpenCode targets require `opencode-serve` on
 `127.0.0.1:4096` with a session whose `directory` matches the target `cwd`.
 Codex targets require a `cx`/Codex app-server session on `127.0.0.1:4107` with
 a matching active or newest CLI thread. Claude/Huddle and zellij fallback are
@@ -109,9 +320,9 @@ available.
 `startup_delay` must be finite and `>= 0`. `poll_interval` and `timeout` must
 be finite and `> 0`; invalid values fail during YAML parsing.
 
-`kill_on_done` is accepted for config compatibility, but in the current working
-tree it is not active: post-DAG output draining replaced the old immediate pane
-kill path. See `BUGS.md` for the follow-up decision.
+`kill_on_done` is accepted for config compatibility, but it is currently
+ignored: post-DAG output draining replaced the old immediate pane kill path.
+See `BUGS.md` for the follow-up decision.
 
 ## Provider Pattern
 
@@ -130,6 +341,10 @@ Avoid treating an agent CLI as the pane command when that CLI expects its prompt
 at startup through argv or stdin. For example, `command: [codex, exec, ...]`
 combined with later `send-text` delivery is fragile because `metastack`
 separates pane startup from prompt delivery.
+
+Tasks are scheduled as a dependency graph. `depends-on` edges are validated and
+topo-sorted before execution, and each provider has a token bucket so concurrent
+work can be rate-limited per provider.
 
 ## Completion
 
@@ -184,30 +399,13 @@ should stay a small portable runtime that consumes a rendered config file.
 
 YAML remains the fallback and lowest-level format.
 
-## Structured Send Roadmap
-
-The v0.3 branch introduces a routing prototype beside the existing DAG runner.
-The routing layer uses one internal envelope and backend-specific adapters:
-
-```text
-OpenCode -> HTTP prompt_async
-Codex    -> JSON-RPC WebSocket app-server
-Claude   -> Huddle channel bridge
-Zellij   -> lossy keystroke fallback
-```
-
-`metastack send <routing-config.yaml> <target> <message...>` is the prototype
-entry point for sending one user-message turn through a configured target.
-OpenCode and Codex are the first concrete adapters; Claude/Huddle and lossy
-terminal fallback are documented as backend contracts for follow-up work.
-The CLI carries correlation metadata internally, but reply routing is still
-roadmap work.
-
 ## Current Limitations
 
-- Tasks run in zellij panes; this is not a general headless dispatch tool.
+- DAG tasks run in zellij panes; the DAG runner is not a general headless
+  dispatch tool.
 - `kill_on_done` is still accepted in config for compatibility, but is currently
-  dead code after the post-DAG output drain change.
+  ignored after the post-DAG output drain change.
 - Pane layout is constrained by what `zellij-mcp` exposes. `direction` and
   `target_pane_id` are available, but complex layout management still depends on
   zellij behavior.
+- Structured send is acceptance-only and does not route replies yet.

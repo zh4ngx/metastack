@@ -2,7 +2,7 @@
 name = "metastack"
 version = "0.1.0"
 edition = "2024"
-description = "Tiny DAG orchestrator over zellij-mcp — Rust/WASI v0"
+description = "Tiny DAG runner over zellij-mcp with a structured agent send prototype"
 license = "MIT"
 
 [[bin]]
