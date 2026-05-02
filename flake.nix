@@ -34,7 +34,9 @@
             overlays = [ (import rust-overlay) ];
           };
 
-          rustToolchain = pkgs.rust-bin.stable.latest.default.override {
+          rustBuildToolchain = pkgs.rust-bin.stable.latest.minimal;
+
+          rustDevToolchain = pkgs.rust-bin.stable.latest.default.override {
             extensions = [
               "rust-src"
               "rust-analyzer"
@@ -42,8 +44,8 @@
           };
 
           rustPlatform = pkgs.makeRustPlatform {
-            cargo = rustToolchain;
-            rustc = rustToolchain;
+            cargo = rustBuildToolchain;
+            rustc = rustBuildToolchain;
           };
 
           cargoToml = builtins.fromTOML (builtins.readFile ./Cargo.toml);
@@ -78,6 +80,29 @@
 
           checks.default = self'.packages.default;
 
+          checks.smoke = pkgs.runCommand "metastack-smoke-check" { } ''
+            version_output="$(${self'.packages.default}/bin/metastack --version)"
+            if [ "$version_output" != "metastack ${cargoToml.package.version}" ]; then
+              echo "unexpected --version output: $version_output" >&2
+              exit 1
+            fi
+            ${self'.packages.default}/bin/metastack --help | grep -q "Structured send"
+            touch "$out"
+          '';
+
+          checks.no-rust-toolchain-reference =
+            pkgs.runCommand "metastack-no-rust-toolchain-reference" { } ''
+              if grep -R -F '${rustBuildToolchain}' ${self'.packages.default} >/dev/null; then
+                echo "metastack output references build Rust toolchain" >&2
+                exit 1
+              fi
+              if grep -R -F '${rustDevToolchain}' ${self'.packages.default} >/dev/null; then
+                echo "metastack output references dev Rust toolchain" >&2
+                exit 1
+              fi
+              touch "$out"
+            '';
+
           checks.version = pkgs.runCommand "metastack-version-check" { } ''
             cargo_version='${cargoToml.package.version}'
             lock_version='${metastackLockPackage.version}'
@@ -103,7 +128,7 @@
 
           devShells.default = pkgs.mkShell {
             packages = with pkgs; [
-              rustToolchain
+              rustDevToolchain
               cargo-nextest
               cargo-watch
               rustfmt

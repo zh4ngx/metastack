@@ -74,18 +74,48 @@ nix profile install .
 With Nix from GitHub:
 
 ```bash
-nix run github:zh4ngx/metastack/v0.8.0 -- <args>
-nix profile install github:zh4ngx/metastack/v0.8.0
+nix run github:zh4ngx/metastack/v0.8.1 -- <args>
+nix profile install github:zh4ngx/metastack/v0.8.1
 ```
 
 Declarative NixOS/Home Manager users can add the flake package to
 `environment.systemPackages` or `home.packages`. There is no
 `programs.metastack` module yet.
 
+For a flake-based NixOS or Home Manager config, add the input:
+
+```nix
+{
+  inputs.metastack.url = "github:zh4ngx/metastack/v0.8.1";
+}
+```
+
+Then install the package from a module that receives `inputs` and `pkgs`:
+
+```nix
+{ inputs, pkgs, ... }:
+{
+  environment.systemPackages = [
+    inputs.metastack.packages.${pkgs.system}.default
+  ];
+}
+```
+
+For Home Manager:
+
+```nix
+{ inputs, pkgs, ... }:
+{
+  home.packages = [
+    inputs.metastack.packages.${pkgs.system}.default
+  ];
+}
+```
+
 With Cargo:
 
 ```bash
-cargo install --git https://github.com/zh4ngx/metastack.git --tag v0.8.0 --locked
+cargo install --git https://github.com/zh4ngx/metastack.git --tag v0.8.1 --locked
 ```
 
 From a local checkout:

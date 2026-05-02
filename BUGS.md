@@ -1,4 +1,8 @@
-# Metastack v0 Production Test — Bugs Surfaced
+# Metastack Historical Bugs and Backlog
+
+This file preserves the v0.1 production-test bug log and a small backlog. It is
+not the source of truth for current protocol status; use `README.md`,
+`ARCHITECTURE.md`, and `CHANGELOG.md` for release-facing behavior.
 
 Test date: 2026-04-29
 Test: 3 parallel codex review tasks via sh-wrapper pattern
@@ -68,11 +72,11 @@ The review-wasi failure is likely a codex exec error (possibly YAML parsing of a
 
 ---
 
-## TODO (post v0.1)
+## Backlog / Known Issues
 
 - **kill_on_done dead code**: `wait_for_spawned_panes()` replaced per-task kill; `kill_on_done` field is now dead code in Config. Either remove from struct (breaking YAML compat) or wire as global kill-after-wait flag.
 - **orchestration test coverage**: Current tests cover focused regressions, not full runtime orchestration. Add fake MCP coverage for `spawn-pane`/`send-text`/`read-pane` sequencing, `wait_for_spawned_panes()`, provider rate limiting, validation edge cases, and shell-wrapper exit-code behavior.
 - **Nix-declared topology**: Keep YAML as the portable runtime config, but add a Nix/Home Manager layer that declares providers, tasks, sessions, rate limits, secrets, and service lifecycle, then renders YAML/JSON for `metastack`. Do not embed Nix evaluation in the Rust binary.
-- **v0.3 hardening — OpenCode serve send backend**: The branch prototype promotes the ad-hoc NixOS status-update recipe into a MetaStack-owned OpenCode serve backend: `GET /session`, select the newest session whose `directory` matches the target project root, then `POST /session/<id>/prompt_async` with `{parts:[{type:"text",text:"..."}]}`. Remaining work: live smoke coverage, response-tail verification, better ambiguity errors when multiple sessions match, and DAG integration.
-- **v0.3 candidate — caller notification (`--notify-pane <id>`)**: After DAG completion, metastack should push a completion message back to the caller's pane via zellij-mcp `send-text`. Replace the current two-layer push-back shell wrapper (trap+sentinel+zellij write-chars chain) with a single metastack flag. The caller runs `metastack config.yaml /tmp/out --notify-pane terminal_0 &` and gets a `[metastack:done]` ping on completion. This is the missing primitive for async dispatch — the caller doesn't poll or wrap; metastack owns the lifecycle notification. Should work with claude-opus (stdin-based submit) and opencode (same); codex interactive pane remains human-driven (crossterm KeyEvent layer mismatch).
-- **routing core follow-up**: The prototype now proves the internal routing envelope, typed target handles, backend capabilities, OpenCode HTTP send, Codex WebSocket send, Claude/Huddle CLI submission, and route-event vocabulary as a parallel path before DAG integration. Remaining work: target-scoped Codex connection managers, parent/caller reply routing via `reply_to`/`correlation_id`, lifecycle-owned `spawn(agent_spec)`, DAG task integration, opt-in live Huddle smoke coverage with `huddle log --n N`, and explicit lossy terminal fallback implementation once addressing semantics are precise.
+- **structured-send hardening**: OpenCode HTTP, Codex app-server, and Claude/Huddle CLI submission are implemented as prototype send backends. Remaining work: live smoke coverage, response-tail verification, better ambiguity errors when multiple sessions match, target-scoped Codex connection managers, and DAG integration.
+- **async caller notification**: A first-class completion notification path is still design-only. The current recommended practice is to report through the parent/child chain using structured send where available.
+- **routing core follow-up**: Remaining work includes parent/caller reply routing via `reply_to`/`correlation_id`, lifecycle-owned `spawn(agent_spec)`, opt-in live Huddle smoke coverage with `huddle log --n N`, and explicit lossy terminal fallback implementation once addressing semantics are precise.

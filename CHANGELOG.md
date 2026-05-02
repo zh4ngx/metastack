@@ -1,5 +1,19 @@
 # Changelog
 
+## v0.8.1 - 2026-05-02
+
+- Make MCP request bookkeeping cancellation-safe so timed-out tool calls do not
+  leave stale pending response slots.
+- Kill the MCP child process on drop, apply the configured timeout to MCP
+  initialization, and close/wait/kill the child on early DAG errors.
+- Exit nonzero when any DAG task is failed, timed out, skipped, or missing from
+  the final result set.
+- Split Nix build and development Rust toolchains so developer components such
+  as `rust-src` and `rust-analyzer` do not leak into the installed package
+  closure.
+- Add Nix checks for installed CLI smoke coverage and accidental Rust toolchain
+  references in the package output.
+
 ## v0.8.0 - 2026-05-02
 
 - Reject unknown DAG config, provider, and task fields instead of silently

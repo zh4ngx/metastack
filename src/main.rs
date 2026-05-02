@@ -265,28 +265,48 @@ async fn main() -> Result<()> {
     config.session = session;
 
     let (client, mut child) = McpClient::start(&config.mcp_binary).await?;
-    client
-        .request("initialize", mcp_initialize_request())
-        .await?;
-    client
-        .notify("notifications/initialized", json!({}))
-        .await?;
+    let run = async {
+        let call_timeout = config.timeout.as_duration();
+        timeout(
+            call_timeout,
+            client.request("initialize", mcp_initialize_request()),
+        )
+        .await
+        .context("MCP initialize timed out")??;
+        timeout(
+            call_timeout,
+            client.notify("notifications/initialized", json!({})),
+        )
+        .await
+        .context("MCP initialized notification timed out")??;
 
-    let mut results = orchestrate(
-        Arc::new(config.clone()),
-        client.clone(),
-        base,
-        output_dir.clone(),
-    )
-    .await?;
-    wait_for_spawned_panes(client.clone(), &config, &mut results, &output_dir).await?;
+        let mut results = orchestrate(
+            Arc::new(config.clone()),
+            client.clone(),
+            base,
+            output_dir.clone(),
+        )
+        .await?;
+        wait_for_spawned_panes(client.clone(), &config, &mut results, &output_dir).await?;
+        Ok::<_, anyhow::Error>(results)
+    }
+    .await;
+    shutdown_mcp_child(&client, &mut child).await;
+    let results = run?;
+    let unsuccessful = has_unsuccessful_tasks(&config.tasks, &results);
+    print_table(&config.tasks, &results);
+    if unsuccessful {
+        bail!("DAG completed with unsuccessful tasks");
+    }
+    Ok(())
+}
+
+async fn shutdown_mcp_child(client: &Arc<McpClient>, child: &mut tokio::process::Child) {
     client.close().await;
     if timeout(Duration::from_secs(2), child.wait()).await.is_err() {
-        let _ = child.kill().await;
-        let _ = child.wait().await;
+        let _ = child.start_kill();
+        let _ = timeout(Duration::from_secs(2), child.wait()).await;
     }
-    print_table(&config.tasks, &results);
-    Ok(())
 }
 
 async fn send_command(args: &[String]) -> Result<()> {
@@ -830,6 +850,14 @@ fn print_table(tasks: &[Task], results: &HashMap<String, TaskResult>) {
     }
 }
 
+fn has_unsuccessful_tasks(tasks: &[Task], results: &HashMap<String, TaskResult>) -> bool {
+    tasks.iter().any(|task| {
+        results
+            .get(&task.name)
+            .is_none_or(|result| result.status != "done")
+    })
+}
+
 fn default_direction() -> String {
     "right".into()
 }
@@ -1070,6 +1098,37 @@ tasks:
         let error = validate(&config).unwrap_err().to_string();
 
         assert!(error.contains("requires finite capacity and refill_per_sec"));
+    }
+
+    #[test]
+    fn reports_unsuccessful_task_results() {
+        let config = valid_config();
+        let done = TaskResult {
+            status: "done".into(),
+            provider: "default".into(),
+            pane_id: "terminal_1".into(),
+            output: String::new(),
+            error: None,
+            elapsed: 1.0,
+        };
+        let failed = TaskResult {
+            status: "failed".into(),
+            provider: "default".into(),
+            pane_id: "terminal_2".into(),
+            output: String::new(),
+            error: Some("boom".into()),
+            elapsed: 1.0,
+        };
+
+        assert!(!has_unsuccessful_tasks(
+            &config.tasks,
+            &HashMap::from([("task".into(), done)])
+        ));
+        assert!(has_unsuccessful_tasks(
+            &config.tasks,
+            &HashMap::from([("task".into(), failed)])
+        ));
+        assert!(has_unsuccessful_tasks(&config.tasks, &HashMap::new()));
     }
 
     fn send_args(parts: &[&str]) -> Vec<String> {
