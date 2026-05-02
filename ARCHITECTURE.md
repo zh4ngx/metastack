@@ -122,6 +122,10 @@ backend-specific discovery.
 The current prototype is narrower than the full envelope:
 
 - `metastack send` sends one-way `user` message turns only.
+- `metastack send` resolves the routing config before target resolution:
+  explicit path-like config argument first, then
+  `$XDG_CONFIG_HOME/metastack/routing.yaml`, then
+  `$HOME/.config/metastack/routing.yaml`.
 - `reply_to` is parsed from config and carried in the envelope, but no reply
   router exists yet. It means "return to caller/parent", not arbitrary peer
   addressing.
@@ -325,8 +329,9 @@ provider in the current prototype.
 
 ## Config V2 Sketch
 
-YAML remains the portable runtime format. A future Nix module can render this
-shape to YAML or JSON.
+YAML remains the portable runtime format. `metastack send` normally loads this
+shape from the discovered routing config path, but callers can still pass an
+explicit path. A future Nix module can render this shape to YAML or JSON.
 
 ```yaml
 version: 2
@@ -370,6 +375,8 @@ The routing core should be tested without live agent processes:
 
 - Envelope serialization and deserialization.
 - Target resolution from static config.
+- Routing config path resolution: explicit path wins, XDG default is preferred,
+  HOME fallback works, and missing defaults produce a clear error.
 - Backend request construction.
 - OpenCode session selection and prompt body construction.
 - Codex JSON-RPC request construction and active-thread selection.

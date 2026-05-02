@@ -18,7 +18,7 @@ process. It then acts as an MCP client, using a small subset of the
 | Mode | Command | Status | Runtime requirements |
 | --- | --- | --- | --- |
 | DAG runner | `metastack [config] [output-dir]` | implemented | `zellij`, `zellij-mcp`, configured providers |
-| Structured send | `metastack send <routing-config> <target> <message...>` | prototype | OpenCode serve, Codex app-server, or Huddle target |
+| Structured send | `metastack send [<routing-config>] <target> <message...>` | prototype | OpenCode serve, Codex app-server, or Huddle target |
 
 Structured send support:
 
@@ -108,8 +108,8 @@ For structured send:
 - Codex targets need `codex-app-server` listening on `127.0.0.1:4107`
 - Claude/Huddle targets need the `huddle` CLI, the `huddled` daemon, and a
   channel-enabled Claude Code session launched through `coh` or equivalent
-- OpenCode and Codex target `cwd` values in the routing config must match an
-  active/newest backend session or thread
+- OpenCode and Codex target `cwd` values in the discovered or explicit routing
+  config must match an active/newest backend session or thread
 
 `metastack` does not start these backend services. In Andy's local agent setup,
 running `oc` from a project root starts or attaches to `opencode-serve`, and
@@ -129,11 +129,15 @@ the Rust 2024 edition.
 
 ## Configuration Files
 
-For installed structured-send use, the intended routing config path is:
+For structured send, an explicit routing config path wins. If the path is
+omitted, `metastack send` resolves the default config as:
 
 ```text
-~/.config/metastack/routing.yaml
+$XDG_CONFIG_HOME/metastack/routing.yaml
+$HOME/.config/metastack/routing.yaml
 ```
+
+On most shells, the HOME fallback is `~/.config/metastack/routing.yaml`.
 
 The repository's `routing.example.yaml` is a shape example with Andy-local
 targets. Copy its structure, but replace `cwd`, Huddle `member`, ports, model
@@ -199,6 +203,7 @@ running backend service. It returns after backend submission or acceptance, not
 after the target agent completes work or replies:
 
 ```bash
+metastack send local-codex "status update"
 metastack send ~/.config/metastack/routing.yaml local-codex "status update"
 ```
 
@@ -303,8 +308,9 @@ nix build .
 Structured send prototype:
 
 ```bash
+cargo run -- send local-codex "status update"
+nix run . -- send local-codex "status update"
 cargo run -- send ~/.config/metastack/routing.yaml local-codex "status update"
-nix run . -- send ~/.config/metastack/routing.yaml local-codex "status update"
 ```
 
 OpenCode targets require `opencode-serve` on

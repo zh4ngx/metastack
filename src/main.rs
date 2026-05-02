@@ -190,6 +190,8 @@ struct TaskResult {
     elapsed: f64,
 }
 
+const SEND_USAGE: &str = "usage: metastack send [<routing-config.yaml>] <target> <message...>";
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = env::args().skip(1).collect::<Vec<_>>();
@@ -252,23 +254,58 @@ async fn main() -> Result<()> {
 }
 
 async fn send_command(args: &[String]) -> Result<()> {
-    let config_path = args
-        .first()
-        .context("usage: metastack send <routing-config.yaml> <target> <message...>")?;
-    let target = args
-        .get(1)
-        .context("usage: metastack send <routing-config.yaml> <target> <message...>")?;
-    let message = args
-        .get(2..)
-        .filter(|parts| !parts.is_empty())
-        .context("usage: metastack send <routing-config.yaml> <target> <message...>")?
-        .join(" ");
+    let (config_path, target, message) = parse_send_args(args, |key| env::var(key).ok())?;
     let origin = env::var("USER").unwrap_or_else(|_| "metastack".to_string());
     let receipt =
-        routing::send_from_config_path(Path::new(config_path), target, message, origin).await?;
+        routing::send_from_config_path(config_path.as_path(), &target, message, origin).await?;
 
     println!("{}", format_send_receipt(&receipt));
     Ok(())
+}
+
+fn parse_send_args(
+    args: &[String],
+    get_var: impl FnMut(&str) -> Option<String>,
+) -> Result<(PathBuf, String, String)> {
+    let first = args.first().context(SEND_USAGE)?;
+    let first_is_config = looks_like_routing_config_path(first);
+    let (config_path, target, message_parts) = if first_is_config {
+        (
+            PathBuf::from(first),
+            args.get(1).context(SEND_USAGE)?.clone(),
+            args.get(2..).context(SEND_USAGE)?,
+        )
+    } else {
+        (
+            default_routing_config_path(get_var)?,
+            first.clone(),
+            args.get(1..).context(SEND_USAGE)?,
+        )
+    };
+
+    let message = (!message_parts.is_empty())
+        .then(|| message_parts.join(" "))
+        .context(SEND_USAGE)?;
+
+    Ok((config_path, target, message))
+}
+
+fn looks_like_routing_config_path(value: &str) -> bool {
+    value.contains('/')
+        || value.ends_with(".yaml")
+        || value.ends_with(".yml")
+        || Path::new(value).is_file()
+}
+
+fn default_routing_config_path(mut get_var: impl FnMut(&str) -> Option<String>) -> Result<PathBuf> {
+    if let Some(config_home) = get_var("XDG_CONFIG_HOME").filter(|value| !value.trim().is_empty()) {
+        return Ok(PathBuf::from(config_home).join("metastack/routing.yaml"));
+    }
+
+    let home = get_var("HOME")
+        .filter(|value| !value.trim().is_empty())
+        .context("metastack send needs routing-config.yaml or XDG_CONFIG_HOME/HOME")?;
+    Ok(PathBuf::from(home).join(".config/metastack/routing.yaml"))
 }
 
 fn format_send_receipt(receipt: &routing::SendReceipt) -> String {
@@ -842,6 +879,96 @@ tasks:
 
         assert_eq!(config.mcp_binary, "zellij-mcp");
         assert!(validate(&config).is_ok());
+    }
+
+    fn send_args(parts: &[&str]) -> Vec<String> {
+        parts.iter().map(|part| part.to_string()).collect()
+    }
+
+    #[test]
+    fn parses_send_args_with_explicit_config_path() {
+        let (config_path, target, message) = parse_send_args(
+            &send_args(&["routing.example.yaml", "local-codex", "status", "update"]),
+            |_| None,
+        )
+        .unwrap();
+
+        assert_eq!(config_path, PathBuf::from("routing.example.yaml"));
+        assert_eq!(target, "local-codex");
+        assert_eq!(message, "status update");
+    }
+
+    #[test]
+    fn parses_send_args_with_default_xdg_config_path() {
+        let (config_path, target, message) = parse_send_args(
+            &send_args(&["local-codex", "status", "update"]),
+            |key| match key {
+                "XDG_CONFIG_HOME" => Some("/tmp/xdg".to_string()),
+                "HOME" => Some("/home/andy".to_string()),
+                _ => None,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            config_path,
+            PathBuf::from("/tmp/xdg/metastack/routing.yaml")
+        );
+        assert_eq!(target, "local-codex");
+        assert_eq!(message, "status update");
+    }
+
+    #[test]
+    fn parses_send_args_with_home_config_fallback() {
+        let (config_path, target, message) =
+            parse_send_args(&send_args(&["local-codex", "status"]), |key| match key {
+                "HOME" => Some("/home/andy".to_string()),
+                _ => None,
+            })
+            .unwrap();
+
+        assert_eq!(
+            config_path,
+            PathBuf::from("/home/andy/.config/metastack/routing.yaml")
+        );
+        assert_eq!(target, "local-codex");
+        assert_eq!(message, "status");
+    }
+
+    #[test]
+    fn send_arg_parser_requires_default_config_environment() {
+        let err = parse_send_args(&send_args(&["local-codex", "status"]), |_| None).unwrap_err();
+
+        assert!(
+            err.to_string()
+                .contains("routing-config.yaml or XDG_CONFIG_HOME/HOME")
+        );
+    }
+
+    #[test]
+    fn send_arg_parser_reports_usage_for_no_args() {
+        let err = parse_send_args(&[], |_| None).unwrap_err();
+
+        assert_eq!(err.to_string(), SEND_USAGE);
+    }
+
+    #[test]
+    fn send_arg_parser_reports_usage_for_missing_message() {
+        let err = parse_send_args(&send_args(&["local-codex"]), |key| match key {
+            "HOME" => Some("/home/andy".to_string()),
+            _ => None,
+        })
+        .unwrap_err();
+
+        assert_eq!(err.to_string(), SEND_USAGE);
+    }
+
+    #[test]
+    fn send_arg_parser_keeps_path_like_config_missing_message_as_usage_error() {
+        let err =
+            parse_send_args(&send_args(&["routing.yaml", "local-codex"]), |_| None).unwrap_err();
+
+        assert_eq!(err.to_string(), SEND_USAGE);
     }
 
     #[test]
