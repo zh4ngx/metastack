@@ -291,10 +291,7 @@ fn parse_send_args(
 }
 
 fn looks_like_routing_config_path(value: &str) -> bool {
-    value.contains('/')
-        || value.ends_with(".yaml")
-        || value.ends_with(".yml")
-        || Path::new(value).is_file()
+    value.contains('/') || value.ends_with(".yaml") || value.ends_with(".yml")
 }
 
 fn default_routing_config_path(mut get_var: impl FnMut(&str) -> Option<String>) -> Result<PathBuf> {
@@ -899,6 +896,32 @@ tasks:
     }
 
     #[test]
+    fn parses_send_args_with_path_like_extensionless_config() {
+        let (config_path, target, message) =
+            parse_send_args(&send_args(&["./routing", "local-codex", "status"]), |_| {
+                None
+            })
+            .unwrap();
+
+        assert_eq!(config_path, PathBuf::from("./routing"));
+        assert_eq!(target, "local-codex");
+        assert_eq!(message, "status");
+    }
+
+    #[test]
+    fn parses_send_args_with_yml_config_suffix() {
+        let (config_path, target, message) = parse_send_args(
+            &send_args(&["routing.yml", "local-codex", "status"]),
+            |_| None,
+        )
+        .unwrap();
+
+        assert_eq!(config_path, PathBuf::from("routing.yml"));
+        assert_eq!(target, "local-codex");
+        assert_eq!(message, "status");
+    }
+
+    #[test]
     fn parses_send_args_with_default_xdg_config_path() {
         let (config_path, target, message) = parse_send_args(
             &send_args(&["local-codex", "status", "update"]),
@@ -932,6 +955,71 @@ tasks:
             PathBuf::from("/home/andy/.config/metastack/routing.yaml")
         );
         assert_eq!(target, "local-codex");
+        assert_eq!(message, "status");
+    }
+
+    #[test]
+    fn parses_send_args_with_blank_xdg_home_fallback() {
+        let (config_path, target, message) =
+            parse_send_args(&send_args(&["local-codex", "status"]), |key| match key {
+                "XDG_CONFIG_HOME" => Some("   ".to_string()),
+                "HOME" => Some("/home/andy".to_string()),
+                _ => None,
+            })
+            .unwrap();
+
+        assert_eq!(
+            config_path,
+            PathBuf::from("/home/andy/.config/metastack/routing.yaml")
+        );
+        assert_eq!(target, "local-codex");
+        assert_eq!(message, "status");
+    }
+
+    #[test]
+    fn send_arg_parser_treats_bare_routing_as_target() {
+        let (config_path, target, message) =
+            parse_send_args(&send_args(&["routing", "status"]), |key| match key {
+                "HOME" => Some("/home/andy".to_string()),
+                _ => None,
+            })
+            .unwrap();
+
+        assert_eq!(
+            config_path,
+            PathBuf::from("/home/andy/.config/metastack/routing.yaml")
+        );
+        assert_eq!(target, "routing");
+        assert_eq!(message, "status");
+    }
+
+    #[test]
+    fn send_arg_parser_does_not_probe_cwd_for_config_paths() {
+        struct TempFile(PathBuf);
+
+        impl Drop for TempFile {
+            fn drop(&mut self) {
+                let _ = fs::remove_file(&self.0);
+            }
+        }
+
+        let file_name = format!("metastack-target-{}", std::process::id());
+        let path = PathBuf::from(&file_name);
+        fs::write(&path, "not a routing config").unwrap();
+        let _cleanup = TempFile(path);
+
+        let (config_path, target, message) =
+            parse_send_args(&send_args(&[&file_name, "status"]), |key| match key {
+                "HOME" => Some("/home/andy".to_string()),
+                _ => None,
+            })
+            .unwrap();
+
+        assert_eq!(
+            config_path,
+            PathBuf::from("/home/andy/.config/metastack/routing.yaml")
+        );
+        assert_eq!(target, file_name);
         assert_eq!(message, "status");
     }
 
