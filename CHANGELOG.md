@@ -1,5 +1,11 @@
 # Changelog
 
+## v0.8.2 - 2026-05-02
+
+- Add GitHub Actions CI for pull requests, `main`, and `v*` tags.
+- Run host `nix flake check`, all-system evaluation, installed CLI smoke
+  checks, and tag-to-package-version validation in CI.
+
 ## v0.8.1 - 2026-05-02
 
 - Make MCP request bookkeeping cancellation-safe so timed-out tool calls do not
