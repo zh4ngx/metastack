@@ -225,9 +225,12 @@ The request body is:
 }
 ```
 
-Target discovery should select the newest session whose `directory` matches the
-target project root. Delivery returns before the agent finishes; OpenCode does
-not provide completion readback through this primitive.
+Target discovery should pass `directory=<cwd>` to the session route, then
+prefer the newest top-level session whose `directory` matches the target project
+root. If only child sessions match, discovery can fall back to the newest child
+session; callers can always pin `session_id` explicitly. Delivery returns before
+the agent finishes; OpenCode does not provide completion readback through this
+primitive.
 
 ### Codex
 
@@ -305,6 +308,8 @@ If `huddle sessions` does not list the target member, dispatch fails with a
 no-target/unavailable error. Successful `huddle send` command exit returns
 `SendStatus::Submitted`. That means local Huddle submission only; it does not
 imply the Claude session read, started, completed, or replied to the message.
+Leading-dash messages are handled for this CLI path, but edge whitespace is not
+guaranteed to round-trip exactly through `huddle send`.
 Use `huddle log --n N` for opt-in smoke-test assertions that the coordinator
 appended the message, not as completion verification. Bidirectional Channels MCP
 integration, reply correlation, and completion tracking are intentionally out

@@ -274,6 +274,8 @@ assertion that the coordinator appended the message, not as completion
 verification. If `DISABLE_TELEMETRY=1` disables Claude channel feature-flag
 evaluation, if the target was launched with `co` instead of `coh`, or if
 `huddled` is down, Huddle delivery will fail outside of MetaStack.
+Leading-dash messages are handled for the current Huddle CLI path, but edge
+whitespace is not guaranteed to round-trip exactly.
 
 zellij fallback targets may parse as config concepts, but `metastack send`
 currently returns an explicit "not implemented" error for them.

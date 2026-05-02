@@ -507,9 +507,23 @@ impl OpenCodeBackend {
         sessions: &'a [OpenCodeSession],
         cwd: &str,
     ) -> Option<&'a OpenCodeSession> {
-        sessions
+        let matching = sessions
             .iter()
             .filter(|session| session.directory.as_deref() == Some(cwd))
+            .collect::<Vec<_>>();
+        let top_level = matching
+            .iter()
+            .copied()
+            .filter(|session| session.parent_id.is_none())
+            .collect::<Vec<_>>();
+        let candidates = if top_level.is_empty() {
+            matching
+        } else {
+            top_level
+        };
+
+        candidates
+            .into_iter()
             .max_by_key(|session| session.updated_sort_key())
     }
 
@@ -517,6 +531,7 @@ impl OpenCodeBackend {
         let sessions: Vec<OpenCodeSession> = self
             .client
             .get(self.session_url())
+            .query(&[("directory", cwd)])
             .send()
             .await?
             .error_for_status()?
@@ -573,6 +588,8 @@ pub struct OpenCodeSession {
     pub directory: Option<String>,
     #[serde(default)]
     pub updated_at: Option<String>,
+    #[serde(default, rename = "parentID")]
+    parent_id: Option<String>,
     #[serde(default)]
     time: Option<OpenCodeSessionTime>,
 }
@@ -1377,18 +1394,21 @@ routes:
                 id: "old".to_string(),
                 directory: Some("/home/andy/nixos".to_string()),
                 updated_at: Some("2026-05-01T00:00:00Z".to_string()),
+                parent_id: None,
                 time: None,
             },
             OpenCodeSession {
                 id: "other".to_string(),
                 directory: Some("/home/andy/vault".to_string()),
                 updated_at: Some("2026-05-01T02:00:00Z".to_string()),
+                parent_id: None,
                 time: None,
             },
             OpenCodeSession {
                 id: "new".to_string(),
                 directory: Some("/home/andy/nixos".to_string()),
                 updated_at: Some("2026-05-01T03:00:00Z".to_string()),
+                parent_id: None,
                 time: None,
             },
         ];
@@ -1397,6 +1417,55 @@ routes:
             OpenCodeBackend::select_session(&sessions, "/home/andy/nixos")
                 .map(|session| session.id.as_str()),
             Some("new")
+        );
+    }
+
+    #[test]
+    fn opencode_session_discovery_prefers_top_level_sessions() {
+        let sessions: Vec<OpenCodeSession> = serde_json::from_value(json!([
+            {
+                "id": "parent",
+                "directory": "/home/andy",
+                "time": {"updated": 10}
+            },
+            {
+                "id": "newer-child",
+                "directory": "/home/andy",
+                "parentID": "parent",
+                "time": {"updated": 20}
+            }
+        ]))
+        .unwrap();
+
+        assert_eq!(
+            OpenCodeBackend::select_session(&sessions, "/home/andy")
+                .map(|session| session.id.as_str()),
+            Some("parent")
+        );
+    }
+
+    #[test]
+    fn opencode_session_discovery_falls_back_when_only_child_sessions_match() {
+        let sessions: Vec<OpenCodeSession> = serde_json::from_value(json!([
+            {
+                "id": "old-child",
+                "directory": "/home/andy",
+                "parentID": "parent",
+                "time": {"updated": 10}
+            },
+            {
+                "id": "new-child",
+                "directory": "/home/andy",
+                "parentID": "parent",
+                "time": {"updated": 20}
+            }
+        ]))
+        .unwrap();
+
+        assert_eq!(
+            OpenCodeBackend::select_session(&sessions, "/home/andy")
+                .map(|session| session.id.as_str()),
+            Some("new-child")
         );
     }
 
@@ -1430,7 +1499,7 @@ routes:
         let server = tokio::spawn(async move {
             let (mut stream, _) = listener.accept().await.unwrap();
             let request = read_http_request(&mut stream).await;
-            assert!(request.starts_with("GET /session "));
+            assert!(request.starts_with("GET /session?directory=%2Fhome%2Fandy%2Fnixos "));
 
             let body = serde_json::to_string(&json!([
                 {
