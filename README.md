@@ -130,18 +130,25 @@ the Rust 2024 edition.
 ## Configuration Files
 
 For structured send, an explicit routing config path wins. If the path is
-omitted, `metastack send` resolves the default config as:
+omitted and `XDG_CONFIG_HOME` is set, `metastack send` uses:
 
 ```text
 $XDG_CONFIG_HOME/metastack/routing.yaml
+```
+
+If `XDG_CONFIG_HOME` is unset or blank, it uses:
+
+```text
 $HOME/.config/metastack/routing.yaml
 ```
 
-On most shells, the HOME fallback is `~/.config/metastack/routing.yaml`.
+On most shells, that HOME fallback is `~/.config/metastack/routing.yaml`.
 
 The repository's `routing.example.yaml` is a shape example with Andy-local
-targets. Copy its structure, but replace `cwd`, Huddle `member`, ports, model
-settings, approval policy, and sandbox policy for your environment.
+targets: `vault-oc`, `nixos-cx`, and `andy-coh`. Copy its structure, but
+replace target names, `cwd`, Huddle `member`, ports, model settings, approval
+policy, and sandbox policy for your environment. The quick-start commands below
+use the generic `local-codex` target from the minimal config in this README.
 
 The DAG runner reads the first positional argument as its config path. If that
 argument is omitted, it defaults to `./metastack.yaml`.
@@ -206,6 +213,9 @@ after the target agent completes work or replies:
 metastack send local-codex "status update"
 metastack send ~/.config/metastack/routing.yaml local-codex "status update"
 ```
+
+These commands assume the default routing config contains a `local-codex`
+target like the minimal config below.
 
 Successful sends print a transport receipt, not a task result:
 

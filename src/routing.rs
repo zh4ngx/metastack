@@ -835,10 +835,14 @@ impl CodexBackend {
     }
 
     pub fn select_thread(value: &Value) -> Option<String> {
-        Self::select_thread_ref(value).map(|thread| thread.id)
+        Self::select_thread_ref(value, None).map(|thread| thread.id)
     }
 
-    fn select_thread_ref(value: &Value) -> Option<CodexThreadRef> {
+    fn select_thread_for_cwd(value: &Value, cwd: &str) -> Option<String> {
+        Self::select_thread_ref(value, Some(cwd)).map(|thread| thread.id)
+    }
+
+    fn select_thread_ref(value: &Value, cwd: Option<&str>) -> Option<CodexThreadRef> {
         let threads = value
             .get("data")
             .or_else(|| value.get("threads"))
@@ -847,14 +851,16 @@ impl CodexBackend {
             .and_then(Value::as_array)
             .or_else(|| value.get("result").and_then(Value::as_array))?;
 
-        let newest_cli = threads.iter().find(|thread| {
+        let matching_threads = Self::threads_matching_cwd(threads.as_slice(), cwd);
+        let newest_cli = matching_threads.iter().copied().find(|thread| {
             Self::thread_source_is_cli(thread) && Self::thread_status(thread) == Some("active")
         });
 
         newest_cli
             .or_else(|| {
-                threads
+                matching_threads
                     .iter()
+                    .copied()
                     .find(|thread| Self::thread_source_is_cli(thread))
             })
             .and_then(|thread| {
@@ -867,6 +873,33 @@ impl CodexBackend {
                     status: Self::thread_status(thread).map(str::to_string),
                 })
             })
+    }
+
+    fn threads_matching_cwd<'a>(threads: &'a [Value], cwd: Option<&str>) -> Vec<&'a Value> {
+        let Some(cwd) = cwd else {
+            return threads.iter().collect();
+        };
+        let matching = threads
+            .iter()
+            .filter(|thread| Self::thread_cwd(thread) == Some(cwd))
+            .collect::<Vec<_>>();
+
+        if !matching.is_empty()
+            || threads
+                .iter()
+                .any(|thread| Self::thread_cwd(thread).is_some())
+        {
+            matching
+        } else {
+            threads.iter().collect()
+        }
+    }
+
+    fn thread_cwd(thread: &Value) -> Option<&str> {
+        thread
+            .get("cwd")
+            .or_else(|| thread.get("directory"))
+            .and_then(Value::as_str)
     }
 
     fn thread_source_is_cli(thread: &Value) -> bool {
@@ -923,7 +956,7 @@ impl SendBackend for CodexBackend {
                     ))
                     .await?;
                     let response = wait_for_response(&mut ws, 2, self.transport_timeout).await?;
-                    Self::select_thread_ref(&response)
+                    Self::select_thread_ref(&response, Some(cwd))
                         .with_context(|| format!("no Codex CLI thread found for cwd {cwd}"))?
                 }
             };
@@ -968,11 +1001,16 @@ where
     tokio::time::timeout(duration, async {
         loop {
             let value = next_ws_json(ws).await?;
-            if let Some(error) = value.get("error") {
-                bail!("JSON-RPC error for id {id}: {error}");
-            }
             if value.get("id").and_then(Value::as_u64) == Some(id) {
+                if let Some(error) = value.get("error") {
+                    bail!("JSON-RPC error for id {id}: {error}");
+                }
                 return Ok(value.get("result").cloned().unwrap_or(Value::Null));
+            }
+            if value.get("id").is_none_or(Value::is_null) {
+                if let Some(error) = value.get("error") {
+                    bail!("JSON-RPC error while waiting for id {id}: {error}");
+                }
             }
         }
     })
@@ -1527,6 +1565,50 @@ routes:
         );
     }
 
+    #[test]
+    fn selects_codex_thread_matching_cwd() {
+        let response = json!({
+            "data": [
+                {
+                    "id": "wrong-active-cli",
+                    "cwd": "/home/andy/other",
+                    "source": "cli",
+                    "status": {"type": "active"}
+                },
+                {
+                    "id": "matching-idle-cli",
+                    "cwd": "/home/andy/nixos",
+                    "source": "cli",
+                    "status": {"type": "idle"}
+                }
+            ]
+        });
+
+        assert_eq!(
+            CodexBackend::select_thread_for_cwd(&response, "/home/andy/nixos").as_deref(),
+            Some("matching-idle-cli")
+        );
+    }
+
+    #[test]
+    fn codex_thread_selection_rejects_mismatched_cwd_when_response_has_cwd() {
+        let response = json!({
+            "data": [
+                {
+                    "id": "wrong-active-cli",
+                    "cwd": "/home/andy/other",
+                    "source": "cli",
+                    "status": {"type": "active"}
+                }
+            ]
+        });
+
+        assert_eq!(
+            CodexBackend::select_thread_for_cwd(&response, "/home/andy/nixos"),
+            None
+        );
+    }
+
     #[tokio::test]
     async fn codex_backend_submits_turn_against_fake_server() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -1620,6 +1702,57 @@ routes:
 
         assert!(error.contains("timed out waiting for JSON-RPC response id 1"));
         server.abort();
+    }
+
+    #[tokio::test]
+    async fn json_rpc_wait_ignores_unrelated_error_ids() {
+        let mut stream = futures_util::stream::iter(vec![
+            Ok(Message::Text(
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": 99,
+                    "error": {"code": -32000, "message": "unrelated"}
+                })
+                .to_string()
+                .into(),
+            )),
+            Ok(Message::Text(
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": 3,
+                    "result": {"ok": true}
+                })
+                .to_string()
+                .into(),
+            )),
+        ]);
+
+        let response = wait_for_response(&mut stream, 3, Duration::from_secs(1))
+            .await
+            .unwrap();
+
+        assert_eq!(response, json!({"ok": true}));
+    }
+
+    #[tokio::test]
+    async fn json_rpc_wait_reports_matching_error_id() {
+        let mut stream = futures_util::stream::iter(vec![Ok(Message::Text(
+            json!({
+                "jsonrpc": "2.0",
+                "id": 3,
+                "error": {"code": -32000, "message": "boom"}
+            })
+            .to_string()
+            .into(),
+        ))]);
+
+        let error = wait_for_response(&mut stream, 3, Duration::from_secs(1))
+            .await
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("JSON-RPC error for id 3"));
+        assert!(error.contains("boom"));
     }
 
     #[test]

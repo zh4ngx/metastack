@@ -123,8 +123,8 @@ The current prototype is narrower than the full envelope:
 
 - `metastack send` sends one-way `user` message turns only.
 - `metastack send` resolves the routing config before target resolution:
-  explicit path-like config argument first, then
-  `$XDG_CONFIG_HOME/metastack/routing.yaml`, then
+  explicit path-like config argument first,
+  `$XDG_CONFIG_HOME/metastack/routing.yaml` when `XDG_CONFIG_HOME` is set, or
   `$HOME/.config/metastack/routing.yaml`.
 - `reply_to` is parsed from config and carried in the envelope, but no reply
   router exists yet. It means "return to caller/parent", not arbitrary peer
