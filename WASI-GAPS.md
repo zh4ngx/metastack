@@ -1,14 +1,17 @@
-# WASI Gaps
+# WASI Design Notes
 
-Metastack v0 uses a native stdio MCP client. That boundary is the part that
-does not fit pure WASI Preview 1.
+Metastack currently builds as a native binary only. These notes describe the
+boundary that would need to move before a future core crate could target WASI
+Preview 1; they are not actionable build instructions for the current crate.
 
 1. `tokio::process::Command` does not exist for `wasm32-wasip1`. Subprocess
    spawning for the MCP stdio client cannot run under pure WASI Preview 1.
 2. `zellij-mcp` shells out through `zellij action` CLI wrappers, so the entire
    stdio transport layer requires a native host that can spawn subprocesses.
-3. The core DAG logic, token bucket math, and YAML parsing can compile to WASI
-   when the native `McpClient` module is excluded. For such a crate, run:
+3. The core DAG logic, token bucket math, and YAML parsing should be able to
+   compile to WASI once they are split into a crate that excludes the native
+   `McpClient` module. For that future crate, the relevant smoke command would
+   be:
 
    ```sh
    cargo build --target wasm32-wasip1

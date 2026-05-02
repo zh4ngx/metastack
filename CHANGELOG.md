@@ -1,5 +1,12 @@
 # Changelog
 
+## v0.9.1 - 2026-05-02
+
+- Add a Nix flake check that builds/tests the crate with the declared
+  `Cargo.toml` `rust-version`, enforcing the Rust MSRV claim.
+- Clarify that the WASI notes are design notes for a future crate split, not an
+  actionable build path for the current native binary.
+
 ## v0.9.0 - 2026-05-02
 
 - Fail closed for implicit OpenCode session discovery when a target `cwd`

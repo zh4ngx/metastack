@@ -34,7 +34,16 @@
             overlays = [ (import rust-overlay) ];
           };
 
+          rustMsrvVersion =
+            let
+              version = cargoToml.package."rust-version";
+            in
+            if builtins.match "[0-9]+\\.[0-9]+" version != null then
+              "${version}.0"
+            else
+              version;
           rustBuildToolchain = pkgs.rust-bin.stable.latest.minimal;
+          rustMsrvToolchain = pkgs.rust-bin.stable.${rustMsrvVersion}.minimal;
 
           rustDevToolchain = pkgs.rust-bin.stable.latest.default.override {
             extensions = [
@@ -46,6 +55,11 @@
           rustPlatform = pkgs.makeRustPlatform {
             cargo = rustBuildToolchain;
             rustc = rustBuildToolchain;
+          };
+
+          msrvRustPlatform = pkgs.makeRustPlatform {
+            cargo = rustMsrvToolchain;
+            rustc = rustMsrvToolchain;
           };
 
           cargoToml = builtins.fromTOML (builtins.readFile ./Cargo.toml);
@@ -79,6 +93,13 @@
           };
 
           checks.default = self'.packages.default;
+
+          checks.msrv = msrvRustPlatform.buildRustPackage {
+            pname = "metastack-msrv";
+            version = cargoToml.package.version;
+            src = ./.;
+            cargoLock.lockFile = ./Cargo.lock;
+          };
 
           checks.smoke = pkgs.runCommand "metastack-smoke-check" { } ''
             version_output="$(${self'.packages.default}/bin/metastack --version)"
