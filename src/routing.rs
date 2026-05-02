@@ -19,20 +19,15 @@ pub enum BackendKind {
     Zellij,
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MessageRole {
+    #[default]
     User,
     // Reserved for future backend-specific role-aware delivery. The prototype
     // public `send` command always creates user-message turns.
     Agent,
     System,
-}
-
-impl Default for MessageRole {
-    fn default() -> Self {
-        Self::User
-    }
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -1024,10 +1019,10 @@ where
                 }
                 return Ok(value.get("result").cloned().unwrap_or(Value::Null));
             }
-            if value.get("id").is_none_or(Value::is_null) {
-                if let Some(error) = value.get("error") {
-                    bail!("JSON-RPC error while waiting for id {id}: {error}");
-                }
+            if value.get("id").is_none_or(Value::is_null)
+                && let Some(error) = value.get("error")
+            {
+                bail!("JSON-RPC error while waiting for id {id}: {error}");
             }
         }
     })
