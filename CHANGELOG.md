@@ -1,5 +1,14 @@
 # Changelog
 
+## v0.10.1 - 2026-05-02
+
+- Ignore Codex `thread/list` records whose status is not `active` or `idle`
+  during implicit thread discovery, preventing stale `notLoaded` SQLite records
+  from creating false routing ambiguity.
+- Keep configured Codex `thread_id` pins explicit: pinned ids are still
+  validated by target `cwd` metadata and CLI source, but are not filtered by
+  status.
+
 ## v0.10.0 - 2026-05-02
 
 - Add flake-exported NixOS and Home Manager modules under

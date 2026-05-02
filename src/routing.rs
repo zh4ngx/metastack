@@ -1062,12 +1062,14 @@ impl CodexBackend {
             return Self::unique_implicit_thread(active_cli, cwd);
         }
 
-        let cli = matching_threads
+        let idle_cli = matching_threads
             .iter()
             .copied()
-            .filter(|thread| Self::thread_source_is_cli(thread))
+            .filter(|thread| {
+                Self::thread_source_is_cli(thread) && Self::thread_status(thread) == Some("idle")
+            })
             .collect::<Vec<_>>();
-        Self::unique_implicit_thread(cli, cwd)
+        Self::unique_implicit_thread(idle_cli, cwd)
     }
 
     fn unique_implicit_thread(
@@ -1082,9 +1084,11 @@ impl CodexBackend {
             }
             _ => match cwd {
                 Some(cwd) => bail!(
-                    "multiple Codex CLI threads found for cwd {cwd}; configure thread_id explicitly"
+                    "multiple live Codex CLI threads found for cwd {cwd}; configure thread_id explicitly"
                 ),
-                None => bail!("multiple Codex CLI threads found; configure thread_id explicitly"),
+                None => {
+                    bail!("multiple live Codex CLI threads found; configure thread_id explicitly")
+                }
             },
         }
     }
@@ -2338,7 +2342,7 @@ routes:
             .unwrap_err()
             .to_string();
 
-        assert!(error.contains("multiple Codex CLI threads"));
+        assert!(error.contains("multiple live Codex CLI threads"));
         assert!(error.contains("thread_id"));
     }
 
@@ -2365,7 +2369,7 @@ routes:
             .unwrap_err()
             .to_string();
 
-        assert!(error.contains("multiple Codex CLI threads"));
+        assert!(error.contains("multiple live Codex CLI threads"));
         assert!(error.contains("thread_id"));
     }
 
@@ -2393,6 +2397,65 @@ routes:
             .unwrap();
 
         assert_eq!(selected.id, "active-cli");
+    }
+
+    #[test]
+    fn codex_thread_selection_ignores_not_loaded_threads() {
+        let response = json!({
+            "data": [
+                {
+                    "id": "stale-a",
+                    "cwd": "/home/andy/nixos",
+                    "source": "cli",
+                    "status": {"type": "notLoaded"}
+                },
+                {
+                    "id": "idle-cli",
+                    "cwd": "/home/andy/nixos",
+                    "source": "cli",
+                    "status": {"type": "idle"}
+                },
+                {
+                    "id": "stale-b",
+                    "cwd": "/home/andy/nixos",
+                    "source": "cli",
+                    "status": {"type": "notLoaded"}
+                }
+            ]
+        });
+
+        let selected = CodexBackend::select_thread_ref(&response, Some("/home/andy/nixos"))
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(selected.id, "idle-cli");
+    }
+
+    #[test]
+    fn codex_thread_selection_returns_none_for_only_not_loaded_threads() {
+        let response = json!({
+            "data": [
+                {
+                    "id": "stale-a",
+                    "cwd": "/home/andy/nixos",
+                    "source": "cli",
+                    "status": {"type": "notLoaded"}
+                },
+                {
+                    "id": "stale-b",
+                    "cwd": "/home/andy/nixos",
+                    "source": "cli",
+                    "status": {"type": "notLoaded"}
+                }
+            ]
+        });
+
+        assert_eq!(
+            CodexBackend::select_thread_ref(&response, Some("/home/andy/nixos"))
+                .unwrap()
+                .map(|thread| thread.id),
+            None
+        );
     }
 
     #[test]
@@ -2478,6 +2541,30 @@ routes:
     }
 
     #[test]
+    fn codex_explicit_thread_validation_allows_not_loaded_pin() {
+        let response = json!({
+            "data": [
+                {
+                    "id": "stale-not-loaded",
+                    "cwd": "/home/andy/nixos",
+                    "source": "cli",
+                    "status": {"type": "notLoaded"}
+                }
+            ]
+        });
+
+        let selected = CodexBackend::select_thread_ref_by_id(
+            &response,
+            Some("/home/andy/nixos"),
+            "stale-not-loaded",
+        )
+        .unwrap();
+
+        assert_eq!(selected.id, "stale-not-loaded");
+        assert_eq!(selected.status.as_deref(), Some("notLoaded"));
+    }
+
+    #[test]
     fn codex_explicit_thread_validation_fails_closed_without_cwd_metadata() {
         let response = json!({
             "data": [
@@ -2551,10 +2638,22 @@ routes:
                     "result": {
                         "data": [
                             {
+                                "id": "stale-a",
+                                "cwd": "/home/andy/nixos",
+                                "source": "cli",
+                                "status": {"type": "notLoaded"}
+                            },
+                            {
                                 "id": "thread-1",
                                 "cwd": "/home/andy/nixos",
                                 "source": "cli",
                                 "status": {"type": "active"}
+                            },
+                            {
+                                "id": "stale-b",
+                                "cwd": "/home/andy/nixos",
+                                "source": "cli",
+                                "status": {"type": "notLoaded"}
                             }
                         ]
                     }
@@ -2730,7 +2829,7 @@ routes:
         let backend = CodexBackend::new(format!("ws://{addr}"));
         let error = backend.send(envelope()).await.unwrap_err().to_string();
 
-        assert!(error.contains("multiple Codex CLI threads"));
+        assert!(error.contains("multiple live Codex CLI threads"));
         assert!(error.contains("thread_id"));
         server.await.unwrap();
     }

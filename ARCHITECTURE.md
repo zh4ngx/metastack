@@ -138,8 +138,10 @@ The current prototype is narrower than the full envelope:
 - zellij fallback remains a design contract/stub until its addressing and reply
   semantics are precise.
 - OpenCode and Codex implicit discovery fail closed when a target `cwd` matches
-  multiple candidate sessions or threads. Pin `session_id` or `thread_id` for
-  stable routing in shared project roots.
+  multiple live candidate sessions or threads. Codex ignores stale `notLoaded`
+  thread records and considers only `active` or `idle` CLI threads. Pin
+  `session_id` or `thread_id` for stable routing in shared project roots with
+  multiple live candidates.
 - Codex opens a WebSocket per prototype send, validates configured thread ids
   against target `cwd` metadata and CLI source, and waits for the
   `turn/start` JSON-RPC response. It does not wait for agent turn completion.
@@ -261,7 +263,9 @@ connect WebSocket
 initialize with experimentalApi
 send initialized notification
 thread/list filtered by cwd
-select exactly one active CLI thread, or validate configured thread_id
+select exactly one active CLI thread
+else select exactly one idle CLI thread, ignoring notLoaded records
+or validate configured thread_id against cwd and CLI source
 thread/resume to load the thread and attach this socket for events
 turn/start
 wait for the turn/start JSON-RPC response
@@ -273,8 +277,9 @@ It intentionally does not keep the socket open for agent completion in the
 prototype. A configured `thread_id` still goes through `thread/list` first so
 MetaStack can reject ids that the app-server reports under a different cwd, with
 no cwd metadata, or from a non-CLI source. Without a configured `thread_id`,
-implicit discovery prefers active CLI threads, but still requires exactly one
-candidate in the selected priority class; multiple candidates fail closed.
+implicit discovery prefers active CLI threads, then idle CLI threads, and
+ignores `notLoaded` records, but still requires exactly one candidate in the
+selected priority class; multiple live candidates fail closed.
 
 Codex input is an array of user input objects:
 
