@@ -13,6 +13,10 @@ backends:
     approval_policy: never
     sandbox_policy:
       type: dangerFullAccess
+
+  huddle:
+    type: claude
+    command: huddle
 agents:
   vault-oc:
     backend: opencode
@@ -21,3 +25,7 @@ agents:
   nixos-cx:
     backend: codex
     cwd: /home/andy/nixos
+
+  andy-coh:
+    backend: huddle
+    member: andy

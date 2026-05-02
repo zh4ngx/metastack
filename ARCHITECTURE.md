@@ -1,9 +1,9 @@
 # MetaStack Architecture
 
-This document describes the v0.3/v1.0 direction for MetaStack structured
+This document describes the v0.4/v1.0 direction for MetaStack structured
 routing and message sending. The v0.2 runtime remains a YAML-driven DAG runner
-over `zellij-mcp`; the v0.3 work adds a routing layer for structured agent
-communication.
+over `zellij-mcp`; v0.3 added OpenCode/Codex routing, and v0.4 adds narrow
+Claude/Huddle submission.
 
 ## Current Runtime
 
@@ -32,7 +32,7 @@ caller
     MetaStack builds an internal RoutingEnvelope
     MetaStack selects backend
     backend sends message
-    backend reports whether the message was accepted
+    backend reports whether the message was submitted or accepted
     MetaStack routes replies by correlation id
 ```
 
@@ -55,8 +55,9 @@ The routing layer has four separate concepts:
 
 Keeping these concepts separate matters because the backends have different
 lifecycle and delivery semantics. OpenCode can accept a prompt over HTTP.
-Codex can acknowledge `turn/start` over JSON-RPC. Zellij can type text but
-cannot provide a structured receipt or preserve message roles.
+Codex can acknowledge `turn/start` over JSON-RPC. Huddle can report local CLI
+submission. Zellij can type text but cannot provide a structured receipt or
+preserve message roles.
 
 ## Topology
 
@@ -86,8 +87,8 @@ Every structured send should pass through one common internal envelope.
 origin            who sent the message
 target            logical agent name or address
 backend           opencode | codex | claude | zellij
-role              internal role; v0.3 sends user-message turns only
-message           text payload for v0.3
+role              internal role; prototype send uses user-message turns only
+message           text payload
 cwd               project root used for target discovery
 session_id        backend session id, when known
 thread_id         backend thread id, when known
@@ -107,7 +108,7 @@ Target discovery should resolve a logical agent name into a typed handle:
 ```text
 OpenCode { cwd, session_id? }
 Codex    { cwd, thread_id? }
-Claude   { channel, member }
+Claude   { channel?, member }
 Zellij   { session, pane_id, submit_strategy }
 ```
 
@@ -118,20 +119,21 @@ backend-specific discovery.
 
 ## Prototype Scope
 
-The current v0.3 prototype is narrower than the full envelope:
+The current prototype is narrower than the full envelope:
 
 - `metastack send` sends one-way `user` message turns only.
 - `reply_to` is parsed from config and carried in the envelope, but no reply
   router exists yet. It means "return to caller/parent", not arbitrary peer
   addressing.
-- OpenCode and Codex are the implemented adapters.
-- Claude/Huddle and zellij fallback are design contracts/stubs until their
-  addressing and reply semantics are precise.
+- OpenCode, Codex, and Claude/Huddle are the implemented prototype adapters.
+- zellij fallback remains a design contract/stub until its addressing and reply
+  semantics are precise.
 - Codex opens a WebSocket per prototype send and waits for the `turn/start`
   JSON-RPC response. It does not wait for agent turn completion.
-- v0.3 is intentionally fire-and-forget after backend acceptance. Durable
-  delivery, acknowledgements, retries, and async agent results belong in a
-  later service/protocol layer.
+- Claude/Huddle shells out to `huddle send` and reports local submission only.
+- The prototype is intentionally fire-and-forget after backend submission or
+  acceptance. Durable delivery, acknowledgements, retries, and async agent
+  results belong in a later service/protocol layer.
 
 ## Backend Semantics
 
@@ -139,7 +141,7 @@ The current v0.3 prototype is narrower than the full envelope:
 |---|---|---|---|---|
 | OpenCode | HTTP `prompt_async` | HTTP status | user prompt turn in prototype | `cwd -> session_id` |
 | Codex | JSON-RPC `turn/start` | JSON-RPC response | user prompt turn in prototype | `cwd -> active cli thread_id` |
-| Claude | Huddle channel | none assumed in v0.3 | contract/stub | channel/member |
+| Claude | `huddle sessions`, then `huddle send` CLI | process exit = submitted | user Huddle message in prototype | channel/member |
 | Zellij | keystrokes | none | not preserved | session/pane id |
 
 Backends should report their capabilities before dispatch:
@@ -150,7 +152,7 @@ has_delivery_receipt
 is_lossy
 ```
 
-`role` in the envelope is internal metadata. The v0.3 public command does not
+`role` in the envelope is internal metadata. The public `send` command does not
 accept role selection; adapters reject anything other than a normal user-message
 turn.
 
@@ -181,14 +183,16 @@ needs_approval
 timeout
 ```
 
-These are not the v0.3 `send` receipt. `send` only reports that the selected
-backend accepted the message. OpenCode can usually report `accepted`; Codex can
-report `accepted` after `turn/start`; zellij can usually report only
+These are not the prototype `send` receipt. `send` only reports that the
+selected backend submitted or accepted the message. OpenCode reports
+`accepted`; Codex reports `accepted` after `turn/start`; Claude/Huddle reports
+`submitted` after local `huddle send` success; zellij can usually report only
 `submitted` or `degraded`.
 
 Do not rebuild reliable message delivery in this layer. If MetaStack needs
 durable acks, retries, subscriptions, or long-running result streams, that
-should happen in a later async-agent protocol layer rather than in the v0.3 CLI.
+should happen in a later async-agent protocol layer rather than in the
+prototype CLI.
 
 MetaStack should use `correlation_id` and `reply_to` to route responses rather
 than forcing agents to guess transport-specific return paths.
@@ -244,7 +248,8 @@ wait for the turn/start JSON-RPC response
 
 Codex is not identical to fire-and-forget HTTP: MetaStack waits for the
 `turn/start` JSON-RPC response so it knows the app-server accepted the message.
-It intentionally does not keep the socket open for agent completion in v0.3.
+It intentionally does not keep the socket open for agent completion in the
+prototype.
 
 Codex input is an array of user input objects:
 
@@ -267,15 +272,43 @@ Do not send OpenCode-style `{ "parts": [...] }` payloads to Codex.
 Claude structured sending is through Huddle channels launched by `coh`.
 Default `co` sessions are not assumed to be channel-enabled.
 
-The Claude backend should model Huddle as the transport, not as the routing
+The local launch requirements are:
+
+```text
+claude-code v2.1.80+
+claude.ai login
+huddle-mcp in ~/.mcp.json
+huddled daemon running
+--dangerously-load-development-channels server:huddle
+```
+
+The Claude backend models Huddle as the transport, not as the routing
 abstraction. MetaStack still owns the routing envelope and target discovery.
-This is not implemented in the current prototype. Treat Huddle like transport
-submission in v0.3 unless the channel API exposes a concrete acknowledgement;
-do not imply remote turn completion.
+Huddle participant names are not necessarily zellij session names. The routing
+config must carry the explicit Huddle `member` shown by `huddle sessions`; do
+not infer it from a zellij session id such as `andy-coh`. `channel` is optional
+metadata/reserved routing context in the current CLI adapter; `huddle send`
+uses `member`.
+
+The v0.4 prototype shells out to:
+
+```text
+huddle sessions
+huddle send --to <member> "<message>"
+```
+
+If `huddle sessions` does not list the target member, dispatch fails with a
+no-target/unavailable error. Successful `huddle send` command exit returns
+`SendStatus::Submitted`. That means local Huddle submission only; it does not
+imply the Claude session read, started, completed, or replied to the message.
+Use `huddle log --n N` for opt-in smoke-test assertions that the coordinator
+appended the message, not as completion verification. Bidirectional Channels MCP
+integration, reply correlation, and completion tracking are intentionally out
+of scope.
 
 ### Zellij Fallback
 
-Zellij remains the universal fallback:
+Zellij remains an explicit lossy fallback option:
 
 ```text
 zellij-mcp send-text
@@ -310,6 +343,9 @@ backends:
     approval_policy: never
     sandbox_policy:
       type: dangerFullAccess
+  huddle:
+    type: claude
+    command: huddle
 
 agents:
   nixos-cx:
@@ -318,12 +354,15 @@ agents:
   vault-oc:
     backend: opencode
     cwd: /home/andy/vault
+  andy-coh:
+    backend: huddle
+    member: andy
 ```
 
 Existing v0.2 task DAG config should continue to parse. Config v2 can be added
 as a parallel schema before replacing the existing YAML shape. Reply routing,
-route paths, Claude/Huddle, and lossy terminal fallback are follow-up contracts,
-not part of the minimal runnable example.
+route paths, and lossy terminal fallback are follow-up contracts, not part of
+the minimal runnable example.
 
 ## Testing Strategy
 
@@ -334,19 +373,21 @@ The routing core should be tested without live agent processes:
 - Backend request construction.
 - OpenCode session selection and prompt body construction.
 - Codex JSON-RPC request construction and active-thread selection.
+- Claude/Huddle command construction, member preflight parsing, and config
+  semantics.
 - Fake backend implementing the common trait.
 
 Live smoke tests should be opt-in because they depend on local services:
 
 - OpenCode serve on `127.0.0.1:4096`.
 - Codex app-server on `127.0.0.1:4107`.
-- Huddle/coh channel availability.
+- Huddle/coh channel availability and `huddle send` behavior.
 - zellij session and pane ids.
 
 ## Migration Plan
 
 1. Add the routing data model and backend trait.
-2. Add OpenCode and Codex prototype backends.
+2. Add OpenCode, Codex, and Claude/Huddle prototype backends.
 3. Add static target discovery from config v2.
 4. Add `metastack send` as a CLI path for one message.
 5. Add lifecycle-owned `spawn(agent_spec)` so MetaStack can create agents with

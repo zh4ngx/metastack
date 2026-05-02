@@ -5,6 +5,7 @@ use futures_util::{SinkExt, StreamExt, future::BoxFuture};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{collections::HashMap, fs, path::Path, time::Duration};
+use tokio::process::Command;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 use uuid::Uuid;
 
@@ -22,7 +23,7 @@ pub enum BackendKind {
 #[serde(rename_all = "snake_case")]
 pub enum MessageRole {
     User,
-    // Reserved for future backend-specific role-aware delivery. The v0.3
+    // Reserved for future backend-specific role-aware delivery. The prototype
     // public `send` command always creates user-message turns.
     Agent,
     System,
@@ -49,12 +50,17 @@ pub struct RoutingEnvelope {
     #[serde(default)]
     pub thread_id: Option<String>,
     #[serde(default)]
+    pub channel: Option<String>,
+    #[serde(default)]
+    pub member: Option<String>,
+    #[serde(default)]
     pub reply_to: Option<String>,
     pub correlation_id: String,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum SendStatus {
+    Submitted,
     Accepted,
 }
 
@@ -82,7 +88,9 @@ pub enum TargetHandle {
         thread_id: Option<String>,
     },
     Claude {
-        channel: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        channel: Option<String>,
+        member: String,
     },
     Zellij {
         #[serde(default)]
@@ -105,7 +113,11 @@ impl TargetHandle {
                 envelope.cwd = Some(cwd.clone());
                 envelope.thread_id = thread_id.clone();
             }
-            Self::Claude { .. } | Self::Zellij { .. } => {}
+            Self::Claude { channel, member } => {
+                envelope.channel = channel.clone();
+                envelope.member = Some(member.clone());
+            }
+            Self::Zellij { .. } => {}
         }
     }
 }
@@ -152,8 +164,8 @@ impl BackendCapabilities {
             },
             BackendKind::Claude => Self {
                 backend,
-                preserves_role: true,
-                has_delivery_receipt: false,
+                preserves_role: false,
+                has_delivery_receipt: true,
                 is_lossy: false,
             },
             BackendKind::Zellij => Self {
@@ -221,11 +233,25 @@ impl RoutingConfig {
             if name.trim().is_empty() {
                 bail!("routing agent name cannot be empty");
             }
-            if agent.cwd.trim().is_empty() {
-                bail!("routing target {name} must define cwd");
-            }
-            if !self.backends.contains_key(&agent.backend) {
-                bail!("target {name} references unknown backend {}", agent.backend);
+            let backend = self.backends.get(&agent.backend).with_context(|| {
+                format!("target {name} references unknown backend {}", agent.backend)
+            })?;
+            match backend.kind() {
+                BackendKind::OpenCode | BackendKind::Codex => {
+                    if agent.cwd.as_deref().is_none_or(|cwd| cwd.trim().is_empty()) {
+                        bail!("routing target {name} must define cwd");
+                    }
+                }
+                BackendKind::Claude => {
+                    if agent
+                        .member
+                        .as_deref()
+                        .is_none_or(|member| ClaudeBackend::normalize_member(member).is_empty())
+                    {
+                        bail!("routing target {name} must define Huddle member");
+                    }
+                }
+                BackendKind::Zellij => {}
             }
         }
 
@@ -242,20 +268,21 @@ pub struct RouteConfig {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct AgentSpec {
     pub backend: String,
-    pub cwd: String,
+    #[serde(default)]
+    pub cwd: Option<String>,
     #[serde(default)]
     pub session_id: Option<String>,
     #[serde(default)]
     pub thread_id: Option<String>,
+    #[serde(default)]
+    pub member: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum BackendConfig {
     #[serde(rename = "opencode")]
-    OpenCode {
-        base_url: String,
-    },
+    OpenCode { base_url: String },
     Codex {
         url: String,
         #[serde(default = "default_codex_model")]
@@ -268,7 +295,10 @@ pub enum BackendConfig {
         sandbox_policy: Value,
     },
     Claude {
-        channel: String,
+        #[serde(default)]
+        channel: Option<String>,
+        #[serde(default = "default_huddle_command")]
+        command: String,
     },
     Zellij {
         mcp_binary: String,
@@ -321,15 +351,28 @@ impl TargetRegistry {
 
         let handle = match backend {
             BackendConfig::OpenCode { .. } => TargetHandle::OpenCode {
-                cwd: agent.cwd.clone(),
+                cwd: agent
+                    .cwd
+                    .clone()
+                    .with_context(|| format!("routing target {target} must define cwd"))?,
                 session_id: agent.session_id.clone(),
             },
             BackendConfig::Codex { .. } => TargetHandle::Codex {
-                cwd: agent.cwd.clone(),
+                cwd: agent
+                    .cwd
+                    .clone()
+                    .with_context(|| format!("routing target {target} must define cwd"))?,
                 thread_id: agent.thread_id.clone(),
             },
-            BackendConfig::Claude { channel } => TargetHandle::Claude {
+            BackendConfig::Claude { channel, .. } => TargetHandle::Claude {
                 channel: channel.clone(),
+                member: agent
+                    .member
+                    .as_deref()
+                    .map(ClaudeBackend::normalize_member)
+                    .with_context(|| {
+                        format!("routing target {target} must define Huddle member")
+                    })?,
             },
             BackendConfig::Zellij { session, .. } => TargetHandle::Zellij {
                 session: session.clone(),
@@ -380,6 +423,8 @@ impl Router {
             cwd: None,
             session_id: None,
             thread_id: None,
+            channel: None,
+            member: None,
             reply_to: self.config.routes.default_reply_to.clone(),
             correlation_id: Uuid::new_v4().simple().to_string(),
         };
@@ -407,7 +452,7 @@ impl Router {
                 CodexBackend::from_config(&backend)?.send(envelope).await
             }
             BackendConfig::Claude { .. } => {
-                bail!("Claude Huddle backend is documented but not implemented in this prototype")
+                ClaudeBackend::from_config(&backend)?.send(envelope).await
             }
             BackendConfig::Zellij { .. } => {
                 bail!("zellij fallback send is not implemented in the structured prototype")
@@ -546,6 +591,122 @@ impl OpenCodeSession {
 struct OpenCodeSessionTime {
     #[serde(default)]
     updated: Option<u64>,
+}
+
+#[derive(Clone, Debug)]
+pub struct ClaudeBackend {
+    command: String,
+    transport_timeout: Duration,
+}
+
+impl ClaudeBackend {
+    pub fn new(command: impl Into<String>) -> Self {
+        Self {
+            command: command.into(),
+            transport_timeout: default_transport_timeout(),
+        }
+    }
+
+    pub fn from_config(config: &BackendConfig) -> Result<Self> {
+        let BackendConfig::Claude { command, .. } = config else {
+            bail!("expected Claude backend config");
+        };
+
+        Ok(Self {
+            command: command.clone(),
+            transport_timeout: default_transport_timeout(),
+        })
+    }
+
+    fn command_args(member: &str, message: &str) -> Vec<String> {
+        vec![
+            "send".to_string(),
+            "--to".to_string(),
+            Self::normalize_member(member),
+            Self::message_arg(message),
+        ]
+    }
+
+    fn sessions_args() -> Vec<String> {
+        vec!["sessions".to_string()]
+    }
+
+    fn normalize_member(member: &str) -> String {
+        member.trim().trim_start_matches('@').to_ascii_lowercase()
+    }
+
+    fn message_arg(message: &str) -> String {
+        if message.starts_with('-') {
+            format!(" {message}")
+        } else {
+            message.to_string()
+        }
+    }
+
+    fn member_is_connected(sessions: &str, member: &str) -> bool {
+        let member = Self::normalize_member(member);
+        sessions
+            .lines()
+            .filter_map(|line| line.split_whitespace().next())
+            .map(Self::normalize_member)
+            .any(|connected| connected == member)
+    }
+
+    async fn output(&self, args: Vec<String>, action: &str) -> Result<std::process::Output> {
+        let mut command = Command::new(&self.command);
+        command.args(args);
+        command.kill_on_drop(true);
+        let output = tokio::time::timeout(self.transport_timeout, command.output())
+            .await
+            .with_context(|| format!("timed out waiting for huddle {action}"))?
+            .with_context(|| format!("failed to run {}", self.command))?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            let detail = if stderr.is_empty() { stdout } else { stderr };
+            bail!(
+                "huddle {action} failed with status {}: {}",
+                output.status,
+                detail
+            );
+        }
+
+        Ok(output)
+    }
+}
+
+impl SendBackend for ClaudeBackend {
+    fn kind(&self) -> BackendKind {
+        BackendKind::Claude
+    }
+
+    fn send<'a>(&'a self, envelope: RoutingEnvelope) -> BoxFuture<'a, Result<SendReceipt>> {
+        Box::pin(async move {
+            ensure_user_message(&envelope)?;
+            let member = envelope
+                .member
+                .as_deref()
+                .context("Claude Huddle send requires member")?;
+
+            let sessions = self.output(Self::sessions_args(), "sessions").await?;
+            let sessions_text = String::from_utf8_lossy(&sessions.stdout);
+            if !Self::member_is_connected(&sessions_text, member) {
+                bail!("huddle target {member} unavailable (no_target)");
+            }
+            self.output(Self::command_args(member, &envelope.message), "send")
+                .await?;
+
+            Ok(SendReceipt {
+                backend: BackendKind::Claude,
+                target: envelope.target,
+                correlation_id: envelope.correlation_id,
+                status: SendStatus::Submitted,
+                session_id: envelope.session_id,
+                thread_id: envelope.thread_id,
+            })
+        })
+    }
 }
 
 #[derive(Clone)]
@@ -859,6 +1020,10 @@ fn default_codex_effort() -> String {
     "xhigh".to_string()
 }
 
+fn default_huddle_command() -> String {
+    "huddle".to_string()
+}
+
 fn default_codex_approval_policy() -> String {
     "never".to_string()
 }
@@ -910,6 +1075,8 @@ mod tests {
             cwd: Some("/home/andy/nixos".to_string()),
             session_id: None,
             thread_id: None,
+            channel: None,
+            member: None,
             reply_to: Some("andy".to_string()),
             correlation_id: "corr-1".to_string(),
         }
@@ -969,6 +1136,56 @@ agents:
     }
 
     #[test]
+    fn parses_claude_huddle_targets_without_cwd() {
+        let config: RoutingConfig = serde_yml::from_str(
+            r#"
+version: 2
+backends:
+  huddle:
+    type: claude
+    channel: huddle
+    command: huddle
+agents:
+  andy-coh:
+    backend: huddle
+    member: andy-coh
+"#,
+        )
+        .unwrap();
+
+        config.validate().unwrap();
+        let registry = TargetRegistry::new(config);
+        let target = registry.resolve("andy-coh").unwrap();
+        assert_eq!(target.backend.kind(), BackendKind::Claude);
+        assert_eq!(
+            target.handle,
+            TargetHandle::Claude {
+                channel: Some("huddle".to_string()),
+                member: "andy-coh".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn validates_claude_huddle_member_is_explicit() {
+        let config: RoutingConfig = serde_yml::from_str(
+            r#"
+version: 2
+backends:
+  huddle:
+    type: claude
+agents:
+  andy-coh:
+    backend: huddle
+"#,
+        )
+        .unwrap();
+
+        let error = config.validate().unwrap_err().to_string();
+        assert!(error.contains("must define Huddle member"));
+    }
+
+    #[test]
     fn validates_config_v2_target_backends() {
         let config: RoutingConfig = serde_yml::from_str(
             r#"
@@ -1022,6 +1239,38 @@ routes:
     }
 
     #[test]
+    fn router_builds_claude_huddle_envelope() {
+        let router = Router::from_yaml(
+            r#"
+version: 2
+backends:
+  huddle:
+    type: claude
+    channel: huddle
+agents:
+  andy-coh:
+    backend: huddle
+    member: andy-coh
+routes:
+  default_reply_to: caller
+"#,
+        )
+        .unwrap();
+
+        let (envelope, backend) = router
+            .envelope_for("andy-coh", "status".to_string(), "andy".to_string())
+            .unwrap();
+
+        assert_eq!(backend.kind(), BackendKind::Claude);
+        assert_eq!(envelope.target, "andy-coh");
+        assert_eq!(envelope.channel.as_deref(), Some("huddle"));
+        assert_eq!(envelope.member.as_deref(), Some("andy-coh"));
+        assert_eq!(envelope.reply_to.as_deref(), Some("caller"));
+        assert!(envelope.cwd.is_none());
+        assert!(!envelope.correlation_id.is_empty());
+    }
+
+    #[test]
     fn routing_example_yaml_stays_parseable() {
         let config: RoutingConfig =
             serde_yml::from_str(include_str!("../routing.example.yaml")).unwrap();
@@ -1029,7 +1278,9 @@ routes:
         config.validate().unwrap();
         assert!(config.backends.contains_key("opencode"));
         assert!(config.backends.contains_key("codex"));
+        assert!(config.backends.contains_key("huddle"));
         assert!(config.agents.contains_key("nixos-cx"));
+        assert!(config.agents.contains_key("andy-coh"));
     }
 
     #[test]
@@ -1038,6 +1289,47 @@ routes:
             OpenCodeBackend::prompt_body("hello"),
             json!({"parts": [{"type": "text", "text": "hello"}]})
         );
+    }
+
+    #[test]
+    fn builds_claude_huddle_command_args() {
+        assert_eq!(
+            ClaudeBackend::command_args("andy-coh", "hello huddle"),
+            vec!["send", "--to", "andy-coh", "hello huddle"]
+        );
+        assert_eq!(
+            ClaudeBackend::command_args("@Andy", "--help"),
+            vec!["send", "--to", "andy", " --help"]
+        );
+        assert_eq!(ClaudeBackend::sessions_args(), vec!["sessions"]);
+    }
+
+    #[test]
+    fn detects_connected_huddle_members() {
+        let sessions = "andy                 pid=1464138 since 2026-05-02T06:10:53.353Z\n\
+                        vault                pid=1465000 since 2026-05-02T06:11:00.000Z";
+
+        assert!(ClaudeBackend::member_is_connected(sessions, "andy"));
+        assert!(ClaudeBackend::member_is_connected(sessions, "@Andy"));
+        assert!(ClaudeBackend::member_is_connected(sessions, " andy "));
+        assert!(ClaudeBackend::member_is_connected(sessions, "vault"));
+        assert!(!ClaudeBackend::member_is_connected(sessions, "andy-coh"));
+    }
+
+    #[tokio::test]
+    async fn claude_backend_reports_missing_huddle_command() {
+        let mut envelope = envelope();
+        envelope.backend = BackendKind::Claude;
+        envelope.target = "andy-coh".to_string();
+        envelope.member = Some("andy-coh".to_string());
+
+        let error = ClaudeBackend::new("metastack-missing-huddle-command-for-test")
+            .send(envelope)
+            .await
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("failed to run metastack-missing-huddle-command-for-test"));
     }
 
     #[test]
@@ -1358,6 +1650,11 @@ routes:
         assert!(!codex.preserves_role);
         assert!(codex.has_delivery_receipt);
         assert!(!codex.is_lossy);
+
+        let claude = BackendCapabilities::for_kind(BackendKind::Claude);
+        assert!(!claude.preserves_role);
+        assert!(claude.has_delivery_receipt);
+        assert!(!claude.is_lossy);
 
         let zellij = BackendCapabilities::for_kind(BackendKind::Zellij);
         assert!(!zellij.preserves_role);

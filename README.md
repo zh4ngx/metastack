@@ -18,7 +18,7 @@ process. It then acts as an MCP client, using a small subset of the
 | Mode | Command | Status | Runtime requirements |
 | --- | --- | --- | --- |
 | DAG runner | `metastack [config] [output-dir]` | implemented | `zellij`, `zellij-mcp`, configured providers |
-| Structured send | `metastack send <routing-config> <target> <message...>` | prototype | OpenCode serve or Codex app-server target |
+| Structured send | `metastack send <routing-config> <target> <message...>` | prototype | OpenCode serve, Codex app-server, or Huddle target |
 
 Structured send support:
 
@@ -26,7 +26,7 @@ Structured send support:
 | --- | --- | --- |
 | OpenCode | implemented prototype | sends one user-message turn through `prompt_async`; no reply routing yet |
 | Codex | implemented prototype | starts one user-message turn through the app-server WebSocket; no reply routing yet |
-| Claude/Huddle | planned | documented contract only |
+| Claude/Huddle | implemented prototype | checks `huddle sessions`, then shells out to `huddle send`; local submission only, no reply routing yet |
 | zellij fallback | planned | documented lossy fallback only |
 
 For routing topology, internal envelopes, and protocol semantics, see
@@ -106,14 +106,23 @@ For structured send:
 
 - OpenCode targets need `opencode-serve` listening on `127.0.0.1:4096`
 - Codex targets need `codex-app-server` listening on `127.0.0.1:4107`
-- target `cwd` values in the routing config must match an active/newest backend
-  session or thread
+- Claude/Huddle targets need the `huddle` CLI, the `huddled` daemon, and a
+  channel-enabled Claude Code session launched through `coh` or equivalent
+- OpenCode and Codex target `cwd` values in the routing config must match an
+  active/newest backend session or thread
 
 `metastack` does not start these backend services. In Andy's local agent setup,
 running `oc` from a project root starts or attaches to `opencode-serve`, and
 running `cx` from a project root starts or attaches to `codex-app-server`.
 Outside that setup, start the equivalent services from those projects and
 adjust the URLs in the routing config.
+
+Claude/Huddle support assumes Claude Code v2.1.80 or newer, a working
+`claude.ai` login, Huddle MCP configured in `~/.mcp.json`, and channels enabled
+with `--dangerously-load-development-channels server:huddle`. The local `coh`
+launcher wraps this setup; ordinary `co` sessions are not channel-enabled.
+Huddle participant names are not necessarily zellij session names, so configure
+the explicit `member` shown by `huddle sessions`.
 
 For development without Nix, use a recent stable Rust toolchain that supports
 the Rust 2024 edition.
@@ -127,8 +136,8 @@ For installed structured-send use, the intended routing config path is:
 ```
 
 The repository's `routing.example.yaml` is a shape example with Andy-local
-targets. Copy its structure, but replace `cwd`, ports, model settings, approval
-policy, and sandbox policy for your environment.
+targets. Copy its structure, but replace `cwd`, Huddle `member`, ports, model
+settings, approval policy, and sandbox policy for your environment.
 
 The DAG runner reads the first positional argument as its config path. If that
 argument is omitted, it defaults to `./metastack.yaml`.
@@ -186,8 +195,8 @@ smoke test.
 ## Structured Send Prototype
 
 The structured send prototype sends one user-message turn through an already
-running backend service. It returns after backend acceptance, not after the
-target agent completes work or replies:
+running backend service. It returns after backend submission or acceptance, not
+after the target agent completes work or replies:
 
 ```bash
 metastack send ~/.config/metastack/routing.yaml local-codex "status update"
@@ -212,6 +221,10 @@ backends:
     sandbox_policy:
       type: dangerFullAccess
 
+  huddle:
+    type: claude
+    command: huddle
+
 agents:
   local-opencode:
     backend: opencode
@@ -220,6 +233,10 @@ agents:
   local-codex:
     backend: codex
     cwd: /path/to/project
+
+  local-claude:
+    backend: huddle
+    member: claude-member-name
 ```
 
 OpenCode returns after HTTP `prompt_async` acceptance. Codex returns after the
@@ -227,8 +244,18 @@ app-server accepts `turn/start`. Production `cx` sessions are stateful
 WebSocket conversations with item, delta, and completion events; this prototype
 only submits one turn and waits for acceptance.
 
-Claude/Huddle and zellij fallback targets may parse as config concepts, but
-`metastack send` currently returns explicit "not implemented" errors for them.
+Claude/Huddle first checks `huddle sessions` for the configured `member`, then
+returns after the local `huddle send` command exits successfully. The receipt
+status is `Submitted`, not `Accepted`, because this only proves local Huddle
+submission. It does not prove the Claude session read, started, completed, or
+replied to the message. Use `huddle log --n N` for an opt-in live smoke-test
+assertion that the coordinator appended the message, not as completion
+verification. If `DISABLE_TELEMETRY=1` disables Claude channel feature-flag
+evaluation, if the target was launched with `co` instead of `coh`, or if
+`huddled` is down, Huddle delivery will fail outside of MetaStack.
+
+zellij fallback targets may parse as config concepts, but `metastack send`
+currently returns an explicit "not implemented" error for them.
 
 ## Safety
 
@@ -277,8 +304,8 @@ nix run . -- send ~/.config/metastack/routing.yaml local-codex "status update"
 OpenCode targets require `opencode-serve` on
 `127.0.0.1:4096` with a session whose `directory` matches the target `cwd`.
 Codex targets require a `cx`/Codex app-server session on `127.0.0.1:4107` with
-a matching active or newest CLI thread. Claude/Huddle and zellij fallback are
-documented contracts, not active `metastack send` adapters yet.
+a matching active or newest CLI thread. Claude/Huddle targets require
+`huddle send` and a channel-enabled `coh` session.
 
 For the DAG runner, the first positional argument is the config path. If
 omitted, it defaults to `./metastack.yaml`.
@@ -408,4 +435,5 @@ YAML remains the fallback and lowest-level format.
 - Pane layout is constrained by what `zellij-mcp` exposes. `direction` and
   `target_pane_id` are available, but complex layout management still depends on
   zellij behavior.
-- Structured send is acceptance-only and does not route replies yet.
+- Structured send reports transport submission or acceptance only and does not
+  route replies yet.
