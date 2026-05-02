@@ -1,17 +1,17 @@
-use anyhow::{anyhow, Context, Result};
-use serde_json::{json, Value};
+use anyhow::{Context, Result, anyhow};
+use serde_json::{Value, json};
 use std::{
     collections::HashMap,
     process::Stdio,
     sync::{
-        atomic::{AtomicU64, Ordering},
         Arc,
+        atomic::{AtomicU64, Ordering},
     },
 };
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
     process::{Child, ChildStdin, ChildStdout, Command},
-    sync::{oneshot, Mutex},
+    sync::{Mutex, oneshot},
 };
 
 pub struct McpClient {
@@ -51,11 +51,13 @@ impl McpClient {
     }
 
     pub async fn notify(&self, method: &str, params: Value) -> Result<()> {
-        self.write_json(json!({"jsonrpc": "2.0", "method": method, "params": params})).await
+        self.write_json(json!({"jsonrpc": "2.0", "method": method, "params": params}))
+            .await
     }
 
     pub async fn call_tool(&self, name: &str, arguments: Value) -> Result<Value> {
-        self.request("tools/call", json!({"name": name, "arguments": arguments})).await
+        self.request("tools/call", json!({"name": name, "arguments": arguments}))
+            .await
     }
 
     pub async fn close(&self) {
@@ -75,8 +77,12 @@ impl McpClient {
 async fn read_loop(stdout: ChildStdout, client: Arc<McpClient>) {
     let mut lines = BufReader::new(stdout).lines();
     while let Ok(Some(line)) = lines.next_line().await {
-        let Ok(value) = serde_json::from_str::<Value>(&line) else { continue };
-        let Some(id) = value.get("id").and_then(Value::as_u64) else { continue };
+        let Ok(value) = serde_json::from_str::<Value>(&line) else {
+            continue;
+        };
+        let Some(id) = value.get("id").and_then(Value::as_u64) else {
+            continue;
+        };
         let result = if let Some(err) = value.get("error") {
             Err(anyhow!("MCP error for id {id}: {err}"))
         } else {

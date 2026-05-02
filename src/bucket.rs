@@ -1,8 +1,8 @@
+use std::time::Instant;
 use tokio::{
     sync::Mutex,
-    time::{sleep, Duration},
+    time::{Duration, sleep},
 };
-use std::time::Instant;
 
 pub struct TokenBucket {
     capacity: f64,
@@ -20,7 +20,10 @@ impl TokenBucket {
         Self {
             capacity,
             refill_per_sec,
-            state: Mutex::new(State { tokens: capacity, last: Instant::now() }),
+            state: Mutex::new(State {
+                tokens: capacity,
+                last: Instant::now(),
+            }),
         }
     }
 
