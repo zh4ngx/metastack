@@ -130,9 +130,10 @@ The current prototype is narrower than the full envelope:
   files in the caller's current directory.
   `$XDG_CONFIG_HOME/metastack/routing.yaml` when `XDG_CONFIG_HOME` is set, or
   `$HOME/.config/metastack/routing.yaml`.
-- `reply_to` is parsed from config and carried in the envelope, but no reply
-  router exists yet. It means "return to caller/parent", not arbitrary peer
-  addressing.
+- `routes.default_reply_to` is parsed from config and copied into the internal
+  envelope `reply_to`, but no reply router exists yet. Config v2 has no
+  per-agent `reply_to` key; unknown agent fields are rejected. `reply_to` means
+  "return to caller/parent", not arbitrary peer addressing.
 - OpenCode, Codex, and Claude/Huddle are the implemented prototype adapters.
 - zellij fallback remains a design contract/stub until its addressing and reply
   semantics are precise.
@@ -321,6 +322,10 @@ no-target/unavailable error. Successful `huddle send` command exit returns
 imply the Claude session read, started, completed, or replied to the message.
 Leading-dash messages are handled for this CLI path, but edge whitespace is not
 guaranteed to round-trip exactly through `huddle send`.
+Because Huddle can parse inline mentions from message text, the adapter rejects
+`@mention` tokens other than the configured target. This fail-closed guard keeps
+`metastack send <target> ...` single-target until Huddle exposes a structured
+send mode that disables inline fanout.
 Use `huddle log --n N` for opt-in smoke-test assertions that the coordinator
 appended the message, not as completion verification. Bidirectional Channels MCP
 integration, reply correlation, and completion tracking are intentionally out
@@ -350,7 +355,9 @@ a schema concept, but dispatch returns an explicit "not implemented" error.
 
 YAML remains the portable runtime format. `metastack send` normally loads this
 shape from the discovered routing config path, but callers can still pass an
-explicit path. A future Nix module can render this shape to YAML or JSON.
+explicit path. A future Nix module should render this shape to YAML unless JSON
+support is explicitly added to config discovery and documented as a supported
+format.
 
 ```yaml
 version: 2

@@ -204,6 +204,7 @@ pub trait SendBackend: Send + Sync {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct RoutingConfig {
     pub version: u8,
     #[serde(default)]
@@ -224,6 +225,13 @@ impl RoutingConfig {
         }
         if self.agents.is_empty() {
             bail!("routing config must define at least one agent");
+        }
+
+        for (name, backend) in &self.backends {
+            if name.trim().is_empty() {
+                bail!("routing backend name cannot be empty");
+            }
+            backend.validate(name)?;
         }
 
         for (name, agent) in &self.agents {
@@ -296,6 +304,7 @@ impl RoutingConfig {
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct RouteConfig {
     #[serde(default)]
     pub default_reply_to: Option<String>,
@@ -316,7 +325,7 @@ pub struct AgentSpec {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum BackendConfig {
     #[serde(rename = "opencode")]
     OpenCode { base_url: String },
@@ -353,6 +362,71 @@ impl BackendConfig {
             Self::Zellij { .. } => BackendKind::Zellij,
         }
     }
+
+    fn validate(&self, name: &str) -> Result<()> {
+        match self {
+            Self::OpenCode { base_url } => {
+                validate_nonblank(name, "base_url", base_url)?;
+                let url = validate_url_scheme(name, "base_url", base_url, &["http", "https"])?;
+                validate_no_query_or_fragment(name, "base_url", &url)?;
+            }
+            Self::Codex {
+                url,
+                model,
+                effort,
+                approval_policy,
+                ..
+            } => {
+                validate_nonblank(name, "url", url)?;
+                validate_url_scheme(name, "url", url, &["ws", "wss"])?;
+                validate_nonblank(name, "model", model)?;
+                validate_nonblank(name, "effort", effort)?;
+                validate_nonblank(name, "approval_policy", approval_policy)?;
+            }
+            Self::Claude { command, .. } => {
+                validate_nonblank(name, "command", command)?;
+            }
+            Self::Zellij { mcp_binary, .. } => {
+                validate_nonblank(name, "mcp_binary", mcp_binary)?;
+            }
+        }
+        Ok(())
+    }
+}
+
+fn validate_nonblank(backend: &str, field: &str, value: &str) -> Result<()> {
+    if value.trim().is_empty() {
+        bail!("routing backend {backend} field {field} cannot be blank");
+    }
+    Ok(())
+}
+
+fn validate_url_scheme(
+    backend: &str,
+    field: &str,
+    value: &str,
+    schemes: &[&str],
+) -> Result<reqwest::Url> {
+    let url = reqwest::Url::parse(value)
+        .with_context(|| format!("routing backend {backend} field {field} must be a URL"))?;
+    if !schemes.contains(&url.scheme()) {
+        bail!(
+            "routing backend {backend} field {field} must use one of: {}",
+            schemes.join(", ")
+        );
+    }
+    Ok(url)
+}
+
+fn validate_no_query_or_fragment(backend: &str, field: &str, url: &reqwest::Url) -> Result<()> {
+    if url.query().is_some() || url.fragment().is_some() {
+        bail!("routing backend {backend} field {field} cannot include query or fragment");
+    }
+    Ok(())
+}
+
+fn is_mention_body(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-'
 }
 
 #[derive(Clone, Debug)]
@@ -722,6 +796,50 @@ impl ClaudeBackend {
             .any(|connected| connected == member)
     }
 
+    fn ensure_single_target_message(message: &str, member: &str) -> Result<()> {
+        let member = Self::normalize_member(member);
+        let escaped = Self::inline_mentions(message)
+            .into_iter()
+            .find(|mention| mention != &member);
+
+        if let Some(mention) = escaped {
+            bail!(
+                "Huddle message contains inline @{mention}; structured send only allows the configured target @{member}"
+            );
+        }
+        Ok(())
+    }
+
+    fn inline_mentions(message: &str) -> Vec<String> {
+        let bytes = message.as_bytes();
+        let mut mentions = Vec::new();
+        let mut i = 0;
+
+        while i < bytes.len() {
+            if bytes[i] != b'@' {
+                i += 1;
+                continue;
+            }
+
+            if i > 0 && is_mention_body(bytes[i - 1]) {
+                i += 1;
+                continue;
+            }
+
+            let mut end = i + 1;
+            while end < bytes.len() && is_mention_body(bytes[end]) {
+                end += 1;
+            }
+
+            if end > i + 1 {
+                mentions.push(String::from_utf8_lossy(&bytes[i + 1..end]).to_ascii_lowercase());
+            }
+            i = end.max(i + 1);
+        }
+
+        mentions
+    }
+
     async fn output(&self, args: Vec<String>, action: &str) -> Result<std::process::Output> {
         let mut command = Command::new(&self.command);
         command.args(args);
@@ -764,6 +882,7 @@ impl SendBackend for ClaudeBackend {
             if !Self::member_is_connected(&sessions_text, member) {
                 bail!("huddle target {member} unavailable (no_target)");
             }
+            Self::ensure_single_target_message(&envelope.message, member)?;
             self.output(Self::command_args(member, &envelope.message), "send")
                 .await?;
 
@@ -1423,6 +1542,51 @@ agents:
     }
 
     #[test]
+    fn rejects_unknown_routing_config_fields() {
+        let unknown_top_level = r#"
+version: 2
+unexpected: true
+backends:
+  cx:
+    type: codex
+    url: ws://127.0.0.1:4107
+agents:
+  local-cx:
+    backend: cx
+    cwd: /home/andy/nixos
+"#;
+        Router::from_yaml(unknown_top_level).unwrap_err();
+
+        let unknown_route_field = r#"
+version: 2
+backends:
+  cx:
+    type: codex
+    url: ws://127.0.0.1:4107
+agents:
+  local-cx:
+    backend: cx
+    cwd: /home/andy/nixos
+routes:
+  reply_to: caller
+"#;
+        Router::from_yaml(unknown_route_field).unwrap_err();
+
+        let unknown_backend_field = r#"
+version: 2
+backends:
+  huddle:
+    type: claude
+    commmand: huddle
+agents:
+  local-claude:
+    backend: huddle
+    member: andy
+"#;
+        Router::from_yaml(unknown_backend_field).unwrap_err();
+    }
+
+    #[test]
     fn rejects_unknown_agent_fields() {
         let text = r#"
 version: 2
@@ -1437,6 +1601,88 @@ agents:
     thread-id: thread-1
 "#;
         Router::from_yaml(text).unwrap_err();
+    }
+
+    #[test]
+    fn validates_backend_config_values() {
+        let blank_backend_name = r#"
+version: 2
+backends:
+  "":
+    type: claude
+agents:
+  local-claude:
+    backend: ""
+    member: andy
+"#;
+        let error = Router::from_yaml(blank_backend_name)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("routing backend name cannot be empty"));
+
+        let blank_huddle_command = r#"
+version: 2
+backends:
+  huddle:
+    type: claude
+    command: " "
+agents:
+  local-claude:
+    backend: huddle
+    member: andy
+"#;
+        let error = Router::from_yaml(blank_huddle_command)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("field command cannot be blank"));
+
+        let wrong_opencode_scheme = r#"
+version: 2
+backends:
+  oc:
+    type: opencode
+    base_url: ws://127.0.0.1:4096
+agents:
+  local-oc:
+    backend: oc
+    cwd: /home/andy/vault
+"#;
+        let error = Router::from_yaml(wrong_opencode_scheme)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("must use one of: http, https"));
+
+        let opencode_query_base_url = r#"
+version: 2
+backends:
+  oc:
+    type: opencode
+    base_url: http://127.0.0.1:4096?x=1
+agents:
+  local-oc:
+    backend: oc
+    cwd: /home/andy/vault
+"#;
+        let error = Router::from_yaml(opencode_query_base_url)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("cannot include query or fragment"));
+
+        let wrong_codex_scheme = r#"
+version: 2
+backends:
+  cx:
+    type: codex
+    url: http://127.0.0.1:4107
+agents:
+  local-cx:
+    backend: cx
+    cwd: /home/andy/nixos
+"#;
+        let error = Router::from_yaml(wrong_codex_scheme)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("must use one of: ws, wss"));
     }
 
     #[test]
@@ -1587,6 +1833,22 @@ routes:
         assert!(ClaudeBackend::member_is_connected(sessions, " andy "));
         assert!(ClaudeBackend::member_is_connected(sessions, "vault"));
         assert!(!ClaudeBackend::member_is_connected(sessions, "andy-coh"));
+    }
+
+    #[test]
+    fn rejects_huddle_inline_mentions_that_escape_target() {
+        ClaudeBackend::ensure_single_target_message("status for @andy", "andy").unwrap();
+        ClaudeBackend::ensure_single_target_message("email user@example.com", "andy").unwrap();
+
+        let error = ClaudeBackend::ensure_single_target_message("status for @vault", "andy")
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("inline @vault"));
+
+        let error = ClaudeBackend::ensure_single_target_message("status for @all", "andy")
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("inline @all"));
     }
 
     #[tokio::test]

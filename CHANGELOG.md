@@ -1,5 +1,19 @@
 # Changelog
 
+## v0.7.0 - 2026-05-02
+
+- Reject Claude/Huddle sends whose message text contains inline `@mention`
+  tokens other than the configured target, preserving single-target routing.
+- Reject unknown routing config fields at the top level, in backend configs,
+  and in `routes`, instead of silently ignoring typos.
+- Validate backend names, required backend fields, and OpenCode/Codex URL
+  schemes before dispatch.
+- Change structured-send receipt stdout from `sent ...` to `receipt ...`,
+  include discovered `session_id` or `thread_id` values when available, and
+  distinguish backend acceptance from local submission.
+- Clarify release practice, NixOS pinning guidance, YAML-only config support,
+  and `routes.default_reply_to` wording.
+
 ## v0.6.1 - 2026-05-02
 
 - Apply the Codex transport timeout to WebSocket JSON writes, not only connect
@@ -14,6 +28,9 @@
   routing config validation.
 - Validate Codex `turn/start` acceptance payloads before reporting an accepted
   send receipt.
+- Compatibility: existing routing configs that relied on ignored or
+  backend-inapplicable agent fields now fail validation. Review routing config
+  fields before upgrading from v0.5.x to v0.6.x.
 
 ## v0.5.2 - 2026-05-02
 

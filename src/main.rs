@@ -309,10 +309,40 @@ fn default_routing_config_path(mut get_var: impl FnMut(&str) -> Option<String>) 
 }
 
 fn format_send_receipt(receipt: &routing::SendReceipt) -> String {
-    format!(
-        "sent backend={:?} target={} transport_status={:?} completion=not_tracked correlation_id={}",
-        receipt.backend, receipt.target, receipt.status, receipt.correlation_id
-    )
+    let mut fields = vec![
+        "receipt".to_string(),
+        format!("backend={:?}", receipt.backend),
+        format!("target={}", receipt_value(&receipt.target)),
+        format!("transport_status={:?}", receipt.status),
+    ];
+    fields.push(match receipt.status {
+        routing::SendStatus::Accepted => "delivery=backend_accepted".to_string(),
+        routing::SendStatus::Submitted => "delivery=local_submission_only".to_string(),
+    });
+    fields.push("completion=not_tracked".to_string());
+    if let Some(session_id) = &receipt.session_id {
+        fields.push(format!("session_id={}", receipt_value(session_id)));
+    }
+    if let Some(thread_id) = &receipt.thread_id {
+        fields.push(format!("thread_id={}", receipt_value(thread_id)));
+    }
+    fields.push(format!(
+        "correlation_id={}",
+        receipt_value(&receipt.correlation_id)
+    ));
+    fields.join(" ")
+}
+
+fn receipt_value(value: &str) -> String {
+    if !value.is_empty() && value.bytes().all(is_receipt_value_safe) {
+        value.to_string()
+    } else {
+        serde_json::to_string(value).expect("string serialization cannot fail")
+    }
+}
+
+fn is_receipt_value_safe(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'/' | b':' | b'@')
 }
 
 async fn orchestrate(
@@ -1120,7 +1150,35 @@ tasks:
 
         assert_eq!(
             format_send_receipt(&receipt),
-            "sent backend=Claude target=andy-coh transport_status=Submitted completion=not_tracked correlation_id=corr-1"
+            "receipt backend=Claude target=andy-coh transport_status=Submitted delivery=local_submission_only completion=not_tracked correlation_id=corr-1"
+        );
+
+        let receipt = routing::SendReceipt {
+            backend: routing::BackendKind::Codex,
+            target: "local-codex".to_string(),
+            correlation_id: "corr-2".to_string(),
+            status: routing::SendStatus::Accepted,
+            session_id: None,
+            thread_id: Some("thread-1".to_string()),
+        };
+
+        assert_eq!(
+            format_send_receipt(&receipt),
+            "receipt backend=Codex target=local-codex transport_status=Accepted delivery=backend_accepted completion=not_tracked thread_id=thread-1 correlation_id=corr-2"
+        );
+
+        let receipt = routing::SendReceipt {
+            backend: routing::BackendKind::OpenCode,
+            target: "bad target".to_string(),
+            correlation_id: "corr-3".to_string(),
+            status: routing::SendStatus::Accepted,
+            session_id: Some("ses-1\nspoof=1".to_string()),
+            thread_id: None,
+        };
+
+        assert_eq!(
+            format_send_receipt(&receipt),
+            r#"receipt backend=OpenCode target="bad target" transport_status=Accepted delivery=backend_accepted completion=not_tracked session_id="ses-1\nspoof=1" correlation_id=corr-3"#
         );
     }
 

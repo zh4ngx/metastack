@@ -39,10 +39,17 @@ merged to `main` with an explicit version bump and tag. Downstream declarative
 systems such as NixOS should consume tags or pinned revisions, not floating
 `main`. While `metastack` is pre-1.0, patch releases are for compatible bug
 fixes and minor releases are for new behavior or compatibility-affecting CLI or
-config changes. Before tagging on the release host, run `nix flake check`; it
-builds the package and checks that Cargo and Nix version metadata stay aligned
-for the host system. Use `nix flake check --all-systems --no-build` to evaluate
-all declared systems when cross-system builders are not available.
+config changes. For NixOS/Home Manager consumers, pin an exact tag or locked
+revision in `flake.lock`. Patch bumps within the same minor line are intended to
+be config-compatible. Minor bumps may add behavior or tighten CLI/config
+compatibility and should be reviewed before updating declarative systems.
+
+Before tagging on the release host, update `CHANGELOG.md`, bump
+`Cargo.toml`/`Cargo.lock`, update public install examples, then run
+`nix flake check`; it builds the package and checks that Cargo and Nix version
+metadata stay aligned for the host system. Use
+`nix flake check --all-systems --no-build` to evaluate all declared systems when
+cross-system builders are not available.
 
 ## Vocabulary
 
@@ -67,8 +74,8 @@ nix profile install .
 With Nix from GitHub:
 
 ```bash
-nix run github:zh4ngx/metastack/v0.6.1 -- <args>
-nix profile install github:zh4ngx/metastack/v0.6.1
+nix run github:zh4ngx/metastack/v0.7.0 -- <args>
+nix profile install github:zh4ngx/metastack/v0.7.0
 ```
 
 Declarative NixOS/Home Manager users can add the flake package to
@@ -78,7 +85,7 @@ Declarative NixOS/Home Manager users can add the flake package to
 With Cargo:
 
 ```bash
-cargo install --git https://github.com/zh4ngx/metastack.git --tag v0.6.1 --locked
+cargo install --git https://github.com/zh4ngx/metastack.git --tag v0.7.0 --locked
 ```
 
 From a local checkout:
@@ -236,7 +243,7 @@ target like the minimal config below.
 Successful sends print a transport receipt, not a task result:
 
 ```text
-sent backend=Codex target=local-codex transport_status=Accepted completion=not_tracked correlation_id=...
+receipt backend=Codex target=local-codex transport_status=Accepted delivery=backend_accepted completion=not_tracked thread_id=... correlation_id=...
 ```
 
 Minimal generic routing config:
@@ -293,7 +300,10 @@ verification. If `DISABLE_TELEMETRY=1` disables Claude channel feature-flag
 evaluation, if the target was launched with `co` instead of `coh`, or if
 `huddled` is down, Huddle delivery will fail outside of MetaStack.
 Leading-dash messages are handled for the current Huddle CLI path, but edge
-whitespace is not guaranteed to round-trip exactly.
+whitespace is not guaranteed to round-trip exactly. Because Huddle can parse
+inline mentions from message text, Claude/Huddle sends reject `@mention` tokens
+other than the configured target; this preserves single-target routing
+semantics.
 
 zellij fallback targets may parse as config concepts, but `metastack send`
 currently returns an explicit "not implemented" error for them.
@@ -449,17 +459,16 @@ artifact name.
 runtime interface.
 
 For NixOS and Home Manager users, the intended direction is to declare the same
-agent topology in Nix and materialize it to YAML or JSON before `metastack`
-starts:
+agent topology in Nix and materialize it to YAML before `metastack` starts:
 
 ```text
 Nix module or flake output
   declares providers, tasks, sessions, rate limits, secrets, and service policy
-  renders metastack config
+  renders metastack YAML config
   starts metastack as a systemd user service
 
 metastack binary
-  reads rendered YAML or JSON
+  reads rendered YAML
   talks to zellij-mcp
   orchestrates the DAG
 ```
@@ -468,7 +477,8 @@ The Rust binary should not evaluate Nix directly. Nix should own declaration,
 materialization, service lifecycle, rollback, and secret injection. `metastack`
 should stay a small portable runtime that consumes a rendered config file.
 
-YAML remains the fallback and lowest-level format.
+YAML remains the fallback and lowest-level format. JSON is not currently a
+documented runtime config format.
 
 ## Current Limitations
 
