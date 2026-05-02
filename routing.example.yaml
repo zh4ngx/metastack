@@ -1,3 +1,7 @@
+# Example structured-send routing config.
+# This file is not runnable as-is: replace Andy-local target names, project
+# roots, member names, ports, and security policy before using it.
+
 version: 2
 
 backends:
@@ -10,6 +14,7 @@ backends:
     url: ws://127.0.0.1:4107
     model: gpt-5.5
     effort: xhigh
+    # Local trusted-agent default only. Use stricter policy for untrusted work.
     approval_policy: never
     sandbox_policy:
       type: dangerFullAccess

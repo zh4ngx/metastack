@@ -234,9 +234,26 @@ impl RoutingConfig {
                 format!("target {name} references unknown backend {}", agent.backend)
             })?;
             match backend.kind() {
-                BackendKind::OpenCode | BackendKind::Codex => {
+                BackendKind::OpenCode => {
                     if agent.cwd.as_deref().is_none_or(|cwd| cwd.trim().is_empty()) {
                         bail!("routing target {name} must define cwd");
+                    }
+                    if agent.thread_id.is_some() {
+                        bail!("routing target {name} cannot define thread_id for OpenCode backend");
+                    }
+                    if agent.member.is_some() {
+                        bail!("routing target {name} cannot define member for OpenCode backend");
+                    }
+                }
+                BackendKind::Codex => {
+                    if agent.cwd.as_deref().is_none_or(|cwd| cwd.trim().is_empty()) {
+                        bail!("routing target {name} must define cwd");
+                    }
+                    if agent.session_id.is_some() {
+                        bail!("routing target {name} cannot define session_id for Codex backend");
+                    }
+                    if agent.member.is_some() {
+                        bail!("routing target {name} cannot define member for Codex backend");
                     }
                 }
                 BackendKind::Claude => {
@@ -247,8 +264,30 @@ impl RoutingConfig {
                     {
                         bail!("routing target {name} must define Huddle member");
                     }
+                    if agent.cwd.is_some() {
+                        bail!("routing target {name} cannot define cwd for Claude backend");
+                    }
+                    if agent.session_id.is_some() {
+                        bail!("routing target {name} cannot define session_id for Claude backend");
+                    }
+                    if agent.thread_id.is_some() {
+                        bail!("routing target {name} cannot define thread_id for Claude backend");
+                    }
                 }
-                BackendKind::Zellij => {}
+                BackendKind::Zellij => {
+                    if agent.cwd.is_some() {
+                        bail!("routing target {name} cannot define cwd for Zellij backend");
+                    }
+                    if agent.session_id.is_some() {
+                        bail!("routing target {name} cannot define session_id for Zellij backend");
+                    }
+                    if agent.thread_id.is_some() {
+                        bail!("routing target {name} cannot define thread_id for Zellij backend");
+                    }
+                    if agent.member.is_some() {
+                        bail!("routing target {name} cannot define member for Zellij backend");
+                    }
+                }
             }
         }
 
@@ -263,6 +302,7 @@ pub struct RouteConfig {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct AgentSpec {
     pub backend: String,
     #[serde(default)]
@@ -961,6 +1001,26 @@ impl CodexBackend {
         }
     }
 
+    fn validate_turn_start_response(value: &Value) -> Result<()> {
+        let turn = value
+            .get("turn")
+            .or_else(|| value.get("data").and_then(|data| data.get("turn")))
+            .context("Codex turn/start response missing turn")?;
+        let turn_id = turn
+            .get("id")
+            .and_then(Value::as_str)
+            .context("Codex turn/start response missing turn id")?;
+        let status = turn
+            .get("status")
+            .and_then(Value::as_str)
+            .context("Codex turn/start response missing turn status")?;
+
+        match status {
+            "completed" | "inProgress" | "queued" | "pending" => Ok(()),
+            other => bail!("Codex turn {turn_id} was not accepted: status {other}"),
+        }
+    }
+
     fn thread_source_is_cli(thread: &Value) -> bool {
         thread.get("source").and_then(Value::as_str) == Some("cli")
             || thread.get("sourceKind").and_then(Value::as_str) == Some("cli")
@@ -1035,7 +1095,8 @@ impl SendBackend for CodexBackend {
                     .into(),
             ))
             .await?;
-            wait_for_response(&mut ws, next_id, self.transport_timeout).await?;
+            let response = wait_for_response(&mut ws, next_id, self.transport_timeout).await?;
+            Self::validate_turn_start_response(&response)?;
 
             Ok(SendReceipt {
                 backend: BackendKind::Codex,
@@ -1262,6 +1323,74 @@ agents:
                 member: "andy-coh".to_string()
             }
         );
+    }
+
+    #[test]
+    fn validates_backend_specific_agent_fields() {
+        let opencode_with_thread_id = r#"
+version: 2
+backends:
+  oc:
+    type: opencode
+    base_url: http://127.0.0.1:4096
+agents:
+  local-oc:
+    backend: oc
+    cwd: /home/andy/vault
+    thread_id: thread-1
+"#;
+        let error = Router::from_yaml(opencode_with_thread_id)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("cannot define thread_id for OpenCode backend"));
+
+        let codex_with_session_id = r#"
+version: 2
+backends:
+  cx:
+    type: codex
+    url: ws://127.0.0.1:4107
+agents:
+  local-cx:
+    backend: cx
+    cwd: /home/andy/nixos
+    session_id: ses-1
+"#;
+        let error = Router::from_yaml(codex_with_session_id)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("cannot define session_id for Codex backend"));
+
+        let claude_with_cwd = r#"
+version: 2
+backends:
+  huddle:
+    type: claude
+agents:
+  local-claude:
+    backend: huddle
+    member: andy
+    cwd: /home/andy
+"#;
+        let error = Router::from_yaml(claude_with_cwd).unwrap_err().to_string();
+        assert!(error.contains("cannot define cwd for Claude backend"));
+    }
+
+    #[test]
+    fn rejects_unknown_agent_fields() {
+        let text = r#"
+version: 2
+backends:
+  cx:
+    type: codex
+    url: ws://127.0.0.1:4107
+agents:
+  local-cx:
+    backend: cx
+    cwd: /home/andy/nixos
+    thread-id: thread-1
+"#;
+        Router::from_yaml(text).unwrap_err();
     }
 
     #[test]
@@ -1824,6 +1953,34 @@ routes:
         );
     }
 
+    #[test]
+    fn validates_codex_turn_start_acceptance_payload() {
+        assert!(
+            CodexBackend::validate_turn_start_response(&json!({
+                "turn": {"id": "turn-1", "status": "inProgress"}
+            }))
+            .is_ok()
+        );
+        assert!(
+            CodexBackend::validate_turn_start_response(&json!({
+                "turn": {"id": "turn-1", "status": "completed"}
+            }))
+            .is_ok()
+        );
+
+        let error = CodexBackend::validate_turn_start_response(&json!({}))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("missing turn"));
+
+        let error = CodexBackend::validate_turn_start_response(&json!({
+            "turn": {"id": "turn-1", "status": "failed"}
+        }))
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("was not accepted"));
+    }
+
     #[tokio::test]
     async fn codex_backend_submits_turn_against_fake_server() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -2019,6 +2176,71 @@ routes:
         let error = backend.send(envelope).await.unwrap_err().to_string();
 
         assert!(error.contains("configured Codex thread_id thread-stale not found"));
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn codex_backend_rejects_failed_turn_start_response() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+
+            let request = next_ws_json(&mut ws).await.unwrap();
+            assert_eq!(request["method"], "initialize");
+            send_ws_json(&mut ws, json!({"jsonrpc": "2.0", "id": 1, "result": {}})).await;
+
+            let notification = next_ws_json(&mut ws).await.unwrap();
+            assert_eq!(notification["method"], "initialized");
+
+            let request = next_ws_json(&mut ws).await.unwrap();
+            assert_eq!(request["method"], "thread/list");
+            send_ws_json(
+                &mut ws,
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": 2,
+                    "result": {
+                        "data": [
+                            {
+                                "id": "thread-1",
+                                "cwd": "/home/andy/nixos",
+                                "source": "cli",
+                                "status": {"type": "active"}
+                            }
+                        ]
+                    }
+                }),
+            )
+            .await;
+
+            let request = next_ws_json(&mut ws).await.unwrap();
+            assert_eq!(request["method"], "thread/resume");
+            send_ws_json(&mut ws, json!({"jsonrpc": "2.0", "id": 3, "result": {}})).await;
+
+            let request = next_ws_json(&mut ws).await.unwrap();
+            assert_eq!(request["method"], "turn/start");
+            send_ws_json(
+                &mut ws,
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": 4,
+                    "result": {
+                        "turn": {
+                            "id": "turn-1",
+                            "status": "failed"
+                        }
+                    }
+                }),
+            )
+            .await;
+        });
+
+        let backend = CodexBackend::new(format!("ws://{addr}"));
+        let error = backend.send(envelope()).await.unwrap_err().to_string();
+
+        assert!(error.contains("Codex turn turn-1 was not accepted"));
         server.await.unwrap();
     }
 

@@ -591,9 +591,22 @@ fn tool_data(result: &Value) -> Result<&Value> {
 fn validate(config: &Config) -> Result<()> {
     let mut indegree = HashMap::<String, usize>::new();
     let mut children = HashMap::<String, Vec<String>>::new();
+    let mut artifact_names = HashMap::<String, String>::new();
     for task in &config.tasks {
         if indegree.insert(task.name.clone(), 0).is_some() {
             bail!("duplicate task name: {}", task.name);
+        }
+        let artifact_name = safe_name(&task.name);
+        if artifact_name.is_empty() {
+            bail!("task {} produces an empty artifact name", task.name);
+        }
+        if let Some(previous) = artifact_names.insert(artifact_name.clone(), task.name.clone()) {
+            bail!(
+                "task {} and task {} both produce artifact name {}",
+                previous,
+                task.name,
+                artifact_name
+            );
         }
         if !config.providers.contains_key(&task.provider) {
             bail!(
@@ -879,6 +892,30 @@ tasks:
 
         assert_eq!(config.mcp_binary, "zellij-mcp");
         assert!(validate(&config).is_ok());
+    }
+
+    #[test]
+    fn validates_artifact_names_are_non_empty_and_unique() {
+        let mut config = valid_config();
+        config.tasks[0].name = "api/v1".to_string();
+        config.tasks.push(Task {
+            name: "api:v1".into(),
+            provider: "default".into(),
+            prompt: "true".into(),
+            depends_on: Vec::new(),
+            cwd: None,
+            direction: None,
+            target_pane_id: None,
+        });
+
+        let error = validate(&config).unwrap_err().to_string();
+        assert!(error.contains("both produce artifact name api-v1"));
+
+        let mut config = valid_config();
+        config.tasks[0].name = String::new();
+        let error = validate(&config).unwrap_err().to_string();
+
+        assert!(error.contains("produces an empty artifact name"));
     }
 
     fn send_args(parts: &[&str]) -> Vec<String> {

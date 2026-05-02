@@ -1,5 +1,15 @@
 # Changelog
 
+## v0.6.0 - 2026-05-02
+
+- Reject DAG task names that would produce empty or duplicate artifact filenames
+  after safe-name normalization.
+- Reject backend-inapplicable and unknown routing agent fields instead of
+  silently ignoring misconfigured target pins. This intentionally tightens
+  routing config validation.
+- Validate Codex `turn/start` acceptance payloads before reporting an accepted
+  send receipt.
+
 ## v0.5.2 - 2026-05-02
 
 - Add a `nix flake check` release guard that builds the package and checks Cargo

@@ -346,7 +346,7 @@ This fallback remains a separate future `send_running_lossy()` primitive, not a
 structured provider in the current prototype. Today, zellij send config parses as
 a schema concept, but dispatch returns an explicit "not implemented" error.
 
-## Config V2 Sketch
+## Routing Config V2
 
 YAML remains the portable runtime format. `metastack send` normally loads this
 shape from the discovered routing config path, but callers can still pass an
@@ -383,10 +383,10 @@ agents:
     member: andy
 ```
 
-Existing v0.2 task DAG config should continue to parse. Config v2 can be added
-as a parallel schema before replacing the existing YAML shape. Reply routing,
-route paths, and lossy terminal fallback are follow-up contracts, not part of
-the minimal runnable example.
+The original task DAG config remains a separate YAML shape. Routing config v2 is
+the current parallel schema for structured send; it does not replace DAG config.
+Reply routing, route paths, and lossy terminal fallback are follow-up contracts,
+not part of the minimal runnable example.
 
 ## Testing Strategy
 

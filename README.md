@@ -39,8 +39,10 @@ merged to `main` with an explicit version bump and tag. Downstream declarative
 systems such as NixOS should consume tags or pinned revisions, not floating
 `main`. While `metastack` is pre-1.0, patch releases are for compatible bug
 fixes and minor releases are for new behavior or compatibility-affecting CLI or
-config changes. Before tagging, run `nix flake check`; it builds the package and
-checks that Cargo and Nix version metadata stay aligned.
+config changes. Before tagging on the release host, run `nix flake check`; it
+builds the package and checks that Cargo and Nix version metadata stay aligned
+for the host system. Use `nix flake check --all-systems --no-build` to evaluate
+all declared systems when cross-system builders are not available.
 
 ## Vocabulary
 
@@ -65,8 +67,8 @@ nix profile install .
 With Nix from GitHub:
 
 ```bash
-nix run github:zh4ngx/metastack/v0.5.2 -- <args>
-nix profile install github:zh4ngx/metastack/v0.5.2
+nix run github:zh4ngx/metastack/v0.6.0 -- <args>
+nix profile install github:zh4ngx/metastack/v0.6.0
 ```
 
 Declarative NixOS/Home Manager users can add the flake package to
@@ -76,7 +78,7 @@ Declarative NixOS/Home Manager users can add the flake package to
 With Cargo:
 
 ```bash
-cargo install --git https://github.com/zh4ngx/metastack.git --tag v0.5.2 --locked
+cargo install --git https://github.com/zh4ngx/metastack.git --tag v0.6.0 --locked
 ```
 
 From a local checkout:
@@ -437,7 +439,9 @@ Task output is written to:
 ```
 
 `safe_task_name` keeps ASCII alphanumeric characters and replaces other
-characters with `-`, capped at 40 characters.
+characters with `-`, capped at 40 characters. Config validation rejects task
+names that normalize to an empty artifact name or collide with another task's
+artifact name.
 
 ## Declarative Nix Roadmap
 
