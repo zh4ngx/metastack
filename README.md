@@ -143,6 +143,9 @@ $HOME/.config/metastack/routing.yaml
 ```
 
 On most shells, that HOME fallback is `~/.config/metastack/routing.yaml`.
+The optional explicit config argument is recognized when the first send
+argument contains `/` or ends in `.yaml` or `.yml`; use `./routing` for an
+extensionless config file.
 
 The repository's `routing.example.yaml` is a shape example with Andy-local
 targets: `vault-oc`, `nixos-cx`, and `andy-coh`. Copy its structure, but
@@ -212,6 +215,7 @@ after the target agent completes work or replies:
 ```bash
 metastack send local-codex "status update"
 metastack send ~/.config/metastack/routing.yaml local-codex "status update"
+metastack send ./routing local-codex "status update"
 ```
 
 These commands assume the default routing config contains a `local-codex`

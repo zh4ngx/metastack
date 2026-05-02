@@ -123,7 +123,9 @@ The current prototype is narrower than the full envelope:
 
 - `metastack send` sends one-way `user` message turns only.
 - `metastack send` resolves the routing config before target resolution:
-  explicit path-like config argument first,
+  explicit path-like config argument first. Path-like means the first argument
+  contains `/` or ends in `.yaml`/`.yml`; bare target names do not depend on
+  files in the caller's current directory.
   `$XDG_CONFIG_HOME/metastack/routing.yaml` when `XDG_CONFIG_HOME` is set, or
   `$HOME/.config/metastack/routing.yaml`.
 - `reply_to` is parsed from config and carried in the envelope, but no reply
