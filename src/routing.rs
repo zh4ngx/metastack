@@ -607,7 +607,11 @@ impl OpenCodeBackend {
     }
 
     fn prompt_async_url(&self, session_id: &str) -> String {
-        format!("{}/session/{session_id}/prompt_async", self.base_url)
+        format!(
+            "{}/session/{}/prompt_async",
+            self.base_url,
+            percent_encode_path_segment(session_id)
+        )
     }
 
     fn prompt_body(message: &str) -> Value {
@@ -1083,20 +1087,10 @@ impl CodexBackend {
         let Some(cwd) = cwd else {
             return threads.iter().collect();
         };
-        let matching = threads
+        threads
             .iter()
             .filter(|thread| Self::thread_cwd(thread) == Some(cwd))
-            .collect::<Vec<_>>();
-
-        if !matching.is_empty()
-            || threads
-                .iter()
-                .any(|thread| Self::thread_cwd(thread).is_some())
-        {
-            matching
-        } else {
-            threads.iter().collect()
-        }
+            .collect::<Vec<_>>()
     }
 
     fn thread_cwd(thread: &Value) -> Option<&str> {
@@ -1323,6 +1317,18 @@ fn default_codex_sandbox_policy() -> Value {
 
 fn default_transport_timeout() -> Duration {
     Duration::from_secs(30)
+}
+
+fn percent_encode_path_segment(value: &str) -> String {
+    let mut encoded = String::new();
+    for byte in value.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~') {
+            encoded.push(byte as char);
+        } else {
+            encoded.push_str(&format!("%{byte:02X}"));
+        }
+    }
+    encoded
 }
 
 #[cfg(test)]
@@ -1808,6 +1814,12 @@ routes:
             OpenCodeBackend::prompt_body("hello"),
             json!({"parts": [{"type": "text", "text": "hello"}]})
         );
+
+        let backend = OpenCodeBackend::new("http://127.0.0.1:4096");
+        assert_eq!(
+            backend.prompt_async_url("ses/one?x=1#frag"),
+            "http://127.0.0.1:4096/session/ses%2Fone%3Fx%3D1%23frag/prompt_async"
+        );
     }
 
     #[test]
@@ -2019,6 +2031,41 @@ routes:
     }
 
     #[tokio::test]
+    async fn opencode_backend_percent_encodes_session_id_path_segment() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let _ = read_http_request(&mut stream).await;
+
+            let body = serde_json::to_string(&json!([
+                {
+                    "id": "ses/one?x=1#frag",
+                    "directory": "/home/andy/nixos",
+                    "time": {"updated": 1}
+                }
+            ]))
+            .unwrap();
+            write_http_response(&mut stream, 200, Some(&body)).await;
+
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let request = read_http_request(&mut stream).await;
+            assert!(request.starts_with("POST /session/ses%2Fone%3Fx%3D1%23frag/prompt_async "));
+            write_http_response(&mut stream, 204, None).await;
+        });
+
+        let backend = OpenCodeBackend::new(format!("http://{addr}"));
+        let mut envelope = envelope();
+        envelope.backend = BackendKind::OpenCode;
+        envelope.cwd = Some("/home/andy/nixos".to_string());
+
+        let receipt = backend.send(envelope).await.unwrap();
+
+        assert_eq!(receipt.session_id.as_deref(), Some("ses/one?x=1#frag"));
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
     async fn opencode_backend_rejects_stale_explicit_session_id() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -2186,6 +2233,24 @@ routes:
                 {
                     "id": "wrong-active-cli",
                     "cwd": "/home/andy/other",
+                    "source": "cli",
+                    "status": {"type": "active"}
+                }
+            ]
+        });
+
+        assert_eq!(
+            CodexBackend::select_thread_for_cwd(&response, "/home/andy/nixos"),
+            None
+        );
+    }
+
+    #[test]
+    fn codex_thread_selection_fails_closed_without_cwd_metadata() {
+        let response = json!({
+            "data": [
+                {
+                    "id": "active-cli",
                     "source": "cli",
                     "status": {"type": "active"}
                 }

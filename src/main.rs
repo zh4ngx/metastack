@@ -191,6 +191,22 @@ struct TaskResult {
 }
 
 const SEND_USAGE: &str = "usage: metastack send [<routing-config.yaml>] <target> <message...>";
+const HELP: &str = "metastack
+
+Usage:
+  metastack [config.yaml] [output-dir]
+  metastack send [routing-config.yaml] <target> <message...>
+  metastack --help
+  metastack --version
+
+Modes:
+  DAG runner       Run a YAML task DAG through zellij-mcp panes.
+  Structured send  Submit one message turn to a configured agent target.
+
+Default files:
+  DAG config:      ./metastack.yaml
+  Routing config:  $XDG_CONFIG_HOME/metastack/routing.yaml or ~/.config/metastack/routing.yaml
+";
 const METASTACK_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 fn mcp_initialize_request() -> Value {
@@ -204,6 +220,20 @@ fn mcp_initialize_request() -> Value {
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = env::args().skip(1).collect::<Vec<_>>();
+    if args
+        .first()
+        .is_some_and(|arg| arg == "--help" || arg == "-h")
+    {
+        println!("{HELP}");
+        return Ok(());
+    }
+    if args
+        .first()
+        .is_some_and(|arg| arg == "--version" || arg == "-V")
+    {
+        println!("metastack {METASTACK_VERSION}");
+        return Ok(());
+    }
     if args.first().is_some_and(|arg| arg == "send") {
         return send_command(&args[1..]).await;
     }
@@ -289,6 +319,9 @@ fn parse_send_args(
     let message = (!message_parts.is_empty())
         .then(|| message_parts.join(" "))
         .context(SEND_USAGE)?;
+    if message.trim().is_empty() {
+        bail!("metastack send message cannot be blank");
+    }
 
     Ok((config_path, target, message))
 }
@@ -925,6 +958,16 @@ tasks:
     }
 
     #[test]
+    fn default_metastack_yaml_stays_portable() {
+        let config: Config =
+            serde_yml::from_str(include_str!("../metastack.yaml")).expect("metastack.yaml parses");
+
+        assert_eq!(config.mcp_binary, "zellij-mcp");
+        assert!(config.session.is_none());
+        assert!(validate(&config).is_ok());
+    }
+
+    #[test]
     fn validates_artifact_names_are_non_empty_and_unique() {
         let mut config = valid_config();
         config.tasks[0].name = "api/v1".to_string();
@@ -1127,6 +1170,17 @@ tasks:
         .unwrap_err();
 
         assert_eq!(err.to_string(), SEND_USAGE);
+    }
+
+    #[test]
+    fn send_arg_parser_rejects_blank_messages() {
+        let err = parse_send_args(&send_args(&["local-codex", "   "]), |key| match key {
+            "HOME" => Some("/home/andy".to_string()),
+            _ => None,
+        })
+        .unwrap_err();
+
+        assert_eq!(err.to_string(), "metastack send message cannot be blank");
     }
 
     #[test]

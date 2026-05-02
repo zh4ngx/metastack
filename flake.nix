@@ -61,6 +61,13 @@
             version = cargoToml.package.version;
             src = ./.;
             cargoLock.lockFile = ./Cargo.lock;
+            meta = with pkgs.lib; {
+              description = cargoToml.package.description;
+              homepage = cargoToml.package.homepage;
+              license = licenses.mit;
+              mainProgram = "metastack";
+              platforms = platforms.linux ++ platforms.darwin;
+            };
           };
 
           apps.default = {

@@ -74,8 +74,8 @@ nix profile install .
 With Nix from GitHub:
 
 ```bash
-nix run github:zh4ngx/metastack/v0.7.0 -- <args>
-nix profile install github:zh4ngx/metastack/v0.7.0
+nix run github:zh4ngx/metastack/v0.7.1 -- <args>
+nix profile install github:zh4ngx/metastack/v0.7.1
 ```
 
 Declarative NixOS/Home Manager users can add the flake package to
@@ -85,7 +85,7 @@ Declarative NixOS/Home Manager users can add the flake package to
 With Cargo:
 
 ```bash
-cargo install --git https://github.com/zh4ngx/metastack.git --tag v0.7.0 --locked
+cargo install --git https://github.com/zh4ngx/metastack.git --tag v0.7.1 --locked
 ```
 
 From a local checkout:
@@ -95,6 +95,14 @@ cargo run -- <args>
 cargo install --path . --locked
 ```
 
+Dependency-light install smoke checks:
+
+```bash
+metastack --version
+metastack --help
+```
+
+The package declares Rust 1.88 or newer as its minimum supported Rust version.
 There is not yet a crates.io release, Homebrew formula, or prebuilt binary
 release.
 
@@ -117,9 +125,23 @@ to the name of an existing zellij session. If `session` is omitted,
 `metastack` uses `ZELLIJ_SESSION_NAME` when that environment variable is
 available.
 
-`zellij-mcp` is not vendored here. Build or install it from the `zellij-mcp`
-project, then put the binary on `PATH` as `zellij-mcp` or set `mcp_binary` to
-its absolute path. The DAG smoke test will fail until this binary is available.
+`zellij-mcp` is not vendored here. Build or install it from
+`https://github.com/zh4ngx/zellij-mcp`; commit `75c94f2` is the known-good
+local version for this release. Put the binary on `PATH` as `zellij-mcp` or set
+`mcp_binary` to its absolute path. The DAG smoke test will fail until this
+binary is available.
+
+One direct checkout/build path is:
+
+```bash
+git clone https://github.com/zh4ngx/zellij-mcp.git
+cd zellij-mcp
+git checkout 75c94f2
+cargo build --release
+```
+
+Then use the resulting `target/release/zellij-mcp` in `mcp_binary`, or place it
+on `PATH`.
 
 For structured send:
 
@@ -221,9 +243,8 @@ If `zellij-mcp` is not on `PATH`, edit `mcp_binary` to point at your local
 binary. Provider commands are resolved from the `metastack` process environment,
 so `command: [sh]` requires `sh` to be available there.
 
-The checked-in `metastack.yaml` is a development example and still contains
-Andy-local paths. Use it as a configuration reference, not as the cold-start
-smoke test.
+The checked-in `metastack.yaml` is the same portable shape as the smoke test and
+contains no Andy-local paths.
 
 ## Structured Send Prototype
 

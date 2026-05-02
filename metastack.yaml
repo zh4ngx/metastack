@@ -1,25 +1,16 @@
-mcp_binary: /home/andy/dev/zellij-mcp/target/debug/zellij-mcp
-session: main
+# Portable default DAG config for `metastack` with no CLI args.
+# Run from inside zellij with `zellij-mcp` on PATH, or set `mcp_binary` below.
+mcp_binary: zellij-mcp
 startup_delay: 0.2
 poll_interval: 0.2
 timeout: 10
-kill_on_done: true
 providers:
-  anthropic:
+  shell:
     command: [sh]
     prompt_mode: shell
     capacity: 1
-    refill_per_sec: 10
-  openai:
-    command: [sh]
-    prompt_mode: shell
-    capacity: 1
-    refill_per_sec: 10
+    refill_per_sec: 1
 tasks:
-  - name: A
-    provider: anthropic
-    prompt: echo hello
-  - name: B
-    depends-on: [A]
-    provider: openai
-    prompt: echo world
+  - name: hello
+    provider: shell
+    prompt: echo hello from metastack

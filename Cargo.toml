@@ -1,9 +1,13 @@
 [package]
 name = "metastack"
-version = "0.7.0"
+version = "0.7.1"
 edition = "2024"
+rust-version = "1.88"
 description = "Tiny DAG runner over zellij-mcp with a structured agent send prototype"
 license = "MIT"
+repository = "https://github.com/zh4ngx/metastack"
+homepage = "https://github.com/zh4ngx/metastack"
+readme = "README.md"
 
 [[bin]]
 name = "metastack"

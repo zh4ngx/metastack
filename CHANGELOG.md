@@ -1,5 +1,17 @@
 # Changelog
 
+## v0.7.1 - 2026-05-02
+
+- Fail closed for implicit Codex thread discovery when `thread/list` lacks
+  `cwd` or `directory` metadata, matching explicit `thread_id` validation.
+- Percent-encode OpenCode `session_id` values when constructing
+  `prompt_async` paths.
+- Reject blank structured-send messages.
+- Add `--help` and `--version` CLI output for install smoke tests.
+- Add MIT license text, Cargo/Nix package metadata, and a portable default
+  `metastack.yaml`.
+- Document the known-good `zellij-mcp` source and commit.
+
 ## v0.7.0 - 2026-05-02
 
 - Reject Claude/Huddle sends whose message text contains inline `@mention`
