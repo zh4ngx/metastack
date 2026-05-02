@@ -1054,19 +1054,20 @@ impl SendBackend for CodexBackend {
                     .await
                     .context("timed out connecting to Codex app-server")??;
 
-            ws.send(Message::Text(
-                Self::initialize_request(1).to_string().into(),
-            ))
-            .await?;
+            send_ws_json(&mut ws, Self::initialize_request(1), self.transport_timeout).await?;
             wait_for_response(&mut ws, 1, self.transport_timeout).await?;
-            ws.send(Message::Text(
-                Self::initialized_notification().to_string().into(),
-            ))
+            send_ws_json(
+                &mut ws,
+                Self::initialized_notification(),
+                self.transport_timeout,
+            )
             .await?;
 
-            ws.send(Message::Text(
-                Self::thread_list_request(2, cwd).to_string().into(),
-            ))
+            send_ws_json(
+                &mut ws,
+                Self::thread_list_request(2, cwd),
+                self.transport_timeout,
+            )
             .await?;
             let response = wait_for_response(&mut ws, 2, self.transport_timeout).await?;
             let thread = if let Some(thread_id) = envelope.thread_id.clone() {
@@ -1080,20 +1081,20 @@ impl SendBackend for CodexBackend {
             let thread_id = thread.id;
 
             let mut next_id = 3;
-            ws.send(Message::Text(
-                self.thread_resume_request(next_id, &thread_id, cwd)
-                    .to_string()
-                    .into(),
-            ))
+            send_ws_json(
+                &mut ws,
+                self.thread_resume_request(next_id, &thread_id, cwd),
+                self.transport_timeout,
+            )
             .await?;
             wait_for_response(&mut ws, next_id, self.transport_timeout).await?;
             next_id += 1;
 
-            ws.send(Message::Text(
-                self.turn_start_request(next_id, &thread_id, &envelope)
-                    .to_string()
-                    .into(),
-            ))
+            send_ws_json(
+                &mut ws,
+                self.turn_start_request(next_id, &thread_id, &envelope),
+                self.transport_timeout,
+            )
             .await?;
             let response = wait_for_response(&mut ws, next_id, self.transport_timeout).await?;
             Self::validate_turn_start_response(&response)?;
@@ -1108,6 +1109,16 @@ impl SendBackend for CodexBackend {
             })
         })
     }
+}
+
+async fn send_ws_json<S>(ws: &mut S, value: Value, duration: Duration) -> Result<()>
+where
+    S: futures_util::Sink<Message, Error = tokio_tungstenite::tungstenite::Error> + Unpin,
+{
+    tokio::time::timeout(duration, ws.send(Message::Text(value.to_string().into())))
+        .await
+        .context("timed out writing JSON-RPC message")??;
+    Ok(())
 }
 
 async fn wait_for_response<S>(ws: &mut S, id: u64, duration: Duration) -> Result<Value>
@@ -1198,6 +1209,10 @@ fn default_transport_timeout() -> Duration {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::{
+        pin::Pin,
+        task::{Context as TaskContext, Poll},
+    };
     use tokio::{
         io::{AsyncReadExt, AsyncWriteExt},
         net::{TcpListener, TcpStream},
@@ -1238,6 +1253,37 @@ mod tests {
             member: None,
             reply_to: Some("andy".to_string()),
             correlation_id: "corr-1".to_string(),
+        }
+    }
+
+    struct PendingFlushSink;
+
+    impl futures_util::Sink<Message> for PendingFlushSink {
+        type Error = tokio_tungstenite::tungstenite::Error;
+
+        fn poll_ready(
+            self: Pin<&mut Self>,
+            _cx: &mut TaskContext<'_>,
+        ) -> Poll<Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn start_send(self: Pin<&mut Self>, _item: Message) -> Result<(), Self::Error> {
+            Ok(())
+        }
+
+        fn poll_flush(
+            self: Pin<&mut Self>,
+            _cx: &mut TaskContext<'_>,
+        ) -> Poll<Result<(), Self::Error>> {
+            Poll::Pending
+        }
+
+        fn poll_close(
+            self: Pin<&mut Self>,
+            _cx: &mut TaskContext<'_>,
+        ) -> Poll<Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
         }
     }
 
@@ -2262,6 +2308,21 @@ routes:
 
         assert!(error.contains("timed out waiting for JSON-RPC response id 1"));
         server.abort();
+    }
+
+    #[tokio::test]
+    async fn ws_json_write_uses_transport_timeout() {
+        let mut sink = PendingFlushSink;
+        let error = super::send_ws_json(
+            &mut sink,
+            json!({"jsonrpc": "2.0", "method": "initialized"}),
+            Duration::from_millis(20),
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+
+        assert!(error.contains("timed out writing JSON-RPC message"));
     }
 
     #[tokio::test]

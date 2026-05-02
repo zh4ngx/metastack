@@ -1,5 +1,10 @@
 # Changelog
 
+## v0.6.1 - 2026-05-02
+
+- Apply the Codex transport timeout to WebSocket JSON writes, not only connect
+  and response waits.
+
 ## v0.6.0 - 2026-05-02
 
 - Reject DAG task names that would produce empty or duplicate artifact filenames

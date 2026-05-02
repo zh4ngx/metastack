@@ -67,8 +67,8 @@ nix profile install .
 With Nix from GitHub:
 
 ```bash
-nix run github:zh4ngx/metastack/v0.6.0 -- <args>
-nix profile install github:zh4ngx/metastack/v0.6.0
+nix run github:zh4ngx/metastack/v0.6.1 -- <args>
+nix profile install github:zh4ngx/metastack/v0.6.1
 ```
 
 Declarative NixOS/Home Manager users can add the flake package to
@@ -78,7 +78,7 @@ Declarative NixOS/Home Manager users can add the flake package to
 With Cargo:
 
 ```bash
-cargo install --git https://github.com/zh4ngx/metastack.git --tag v0.6.0 --locked
+cargo install --git https://github.com/zh4ngx/metastack.git --tag v0.6.1 --locked
 ```
 
 From a local checkout:
