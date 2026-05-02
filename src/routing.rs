@@ -441,7 +441,10 @@ impl OpenCodeBackend {
     pub fn new(base_url: impl Into<String>) -> Self {
         Self {
             base_url: base_url.into().trim_end_matches('/').to_string(),
-            client: reqwest::Client::new(),
+            client: reqwest::Client::builder()
+                .timeout(default_transport_timeout())
+                .build()
+                .expect("reqwest client builder should accept transport timeout"),
         }
     }
 
@@ -554,6 +557,7 @@ pub struct CodexBackend {
     effort: String,
     approval_policy: String,
     sandbox_policy: Value,
+    transport_timeout: Duration,
     completion_timeout: Duration,
 }
 
@@ -565,6 +569,7 @@ impl CodexBackend {
             effort: default_codex_effort(),
             approval_policy: default_codex_approval_policy(),
             sandbox_policy: default_codex_sandbox_policy(),
+            transport_timeout: default_transport_timeout(),
             completion_timeout: Duration::from_secs(300),
         }
     }
@@ -587,6 +592,7 @@ impl CodexBackend {
             effort: effort.clone(),
             approval_policy: approval_policy.clone(),
             sandbox_policy: sandbox_policy.clone(),
+            transport_timeout: default_transport_timeout(),
             completion_timeout: Duration::from_secs(300),
         })
     }
@@ -764,13 +770,16 @@ impl InjectionBackend for CodexBackend {
                 .cwd
                 .as_deref()
                 .context("Codex injection requires cwd")?;
-            let (mut ws, _) = connect_async(&self.url).await?;
+            let (mut ws, _) =
+                tokio::time::timeout(self.transport_timeout, connect_async(&self.url))
+                    .await
+                    .context("timed out connecting to Codex app-server")??;
 
             ws.send(Message::Text(
                 Self::initialize_request(1).to_string().into(),
             ))
             .await?;
-            wait_for_response(&mut ws, 1).await?;
+            wait_for_response(&mut ws, 1, self.transport_timeout).await?;
             ws.send(Message::Text(
                 Self::initialized_notification().to_string().into(),
             ))
@@ -786,7 +795,7 @@ impl InjectionBackend for CodexBackend {
                         Self::thread_list_request(2, cwd).to_string().into(),
                     ))
                     .await?;
-                    let response = wait_for_response(&mut ws, 2).await?;
+                    let response = wait_for_response(&mut ws, 2, self.transport_timeout).await?;
                     Self::select_thread_ref(&response)
                         .with_context(|| format!("no Codex CLI thread found for cwd {cwd}"))?
                 }
@@ -800,7 +809,7 @@ impl InjectionBackend for CodexBackend {
                     .into(),
             ))
             .await?;
-            wait_for_response(&mut ws, next_id).await?;
+            wait_for_response(&mut ws, next_id, self.transport_timeout).await?;
             next_id += 1;
 
             ws.send(Message::Text(
@@ -809,7 +818,7 @@ impl InjectionBackend for CodexBackend {
                     .into(),
             ))
             .await?;
-            let turn_response = wait_for_response(&mut ws, next_id).await?;
+            let turn_response = wait_for_response(&mut ws, next_id, self.transport_timeout).await?;
             let turn_id =
                 Self::turn_id(&turn_response).context("Codex turn/start did not return turn id")?;
 
@@ -862,21 +871,25 @@ impl InjectionBackend for CodexBackend {
     }
 }
 
-async fn wait_for_response<S>(ws: &mut S, id: u64) -> Result<Value>
+async fn wait_for_response<S>(ws: &mut S, id: u64, duration: Duration) -> Result<Value>
 where
     S: futures_util::Stream<
             Item = std::result::Result<Message, tokio_tungstenite::tungstenite::Error>,
         > + Unpin,
 {
-    loop {
-        let value = next_ws_json(ws).await?;
-        if let Some(error) = value.get("error") {
-            bail!("JSON-RPC error for id {id}: {error}");
+    tokio::time::timeout(duration, async {
+        loop {
+            let value = next_ws_json(ws).await?;
+            if let Some(error) = value.get("error") {
+                bail!("JSON-RPC error for id {id}: {error}");
+            }
+            if value.get("id").and_then(Value::as_u64) == Some(id) {
+                return Ok(value.get("result").cloned().unwrap_or(Value::Null));
+            }
         }
-        if value.get("id").and_then(Value::as_u64) == Some(id) {
-            return Ok(value.get("result").cloned().unwrap_or(Value::Null));
-        }
-    }
+    })
+    .await
+    .with_context(|| format!("timed out waiting for JSON-RPC response id {id}"))?
 }
 
 async fn next_ws_json<S>(ws: &mut S) -> Result<Value>
@@ -933,6 +946,10 @@ fn default_codex_approval_policy() -> String {
 
 fn default_codex_sandbox_policy() -> Value {
     json!({"type": "dangerFullAccess"})
+}
+
+fn default_transport_timeout() -> Duration {
+    Duration::from_secs(30)
 }
 
 #[cfg(test)]
@@ -1206,6 +1223,33 @@ routes:
         server.await.unwrap();
     }
 
+    #[tokio::test]
+    async fn opencode_backend_times_out_when_session_endpoint_stalls() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let _ = read_http_request(&mut stream).await;
+            tokio::time::sleep(Duration::from_secs(5)).await;
+        });
+
+        let mut backend = OpenCodeBackend::new(format!("http://{addr}"));
+        backend.client = reqwest::Client::builder()
+            .timeout(Duration::from_millis(20))
+            .build()
+            .unwrap();
+        let mut envelope = envelope();
+        envelope.backend = BackendKind::OpenCode;
+        envelope.cwd = Some("/home/andy/nixos".to_string());
+
+        let result = tokio::time::timeout(Duration::from_secs(1), backend.inject(envelope))
+            .await
+            .expect("OpenCode injection should return before outer test timeout");
+
+        assert!(result.is_err());
+        server.abort();
+    }
+
     #[test]
     fn builds_codex_json_rpc_payloads() {
         let backend = CodexBackend::new("ws://127.0.0.1:4107");
@@ -1395,6 +1439,26 @@ routes:
         assert_eq!(receipt.status, InjectionStatus::Completed);
         assert_eq!(receipt.thread_id.as_deref(), Some("thread-1"));
         server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn codex_backend_times_out_waiting_for_rpc_response() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+            let request = next_ws_json(&mut ws).await.unwrap();
+            assert_eq!(request["method"], "initialize");
+            tokio::time::sleep(Duration::from_secs(5)).await;
+        });
+
+        let mut backend = CodexBackend::new(format!("ws://{addr}"));
+        backend.transport_timeout = Duration::from_millis(20);
+        let error = backend.inject(envelope()).await.unwrap_err().to_string();
+
+        assert!(error.contains("timed out waiting for JSON-RPC response id 1"));
+        server.abort();
     }
 
     #[test]
