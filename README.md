@@ -202,6 +202,12 @@ after the target agent completes work or replies:
 metastack send ~/.config/metastack/routing.yaml local-codex "status update"
 ```
 
+Successful sends print a transport receipt, not a task result:
+
+```text
+sent backend=Codex target=local-codex transport_status=Accepted completion=not_tracked correlation_id=...
+```
+
 Minimal generic routing config:
 
 ```yaml

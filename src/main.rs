@@ -267,11 +267,15 @@ async fn send_command(args: &[String]) -> Result<()> {
     let receipt =
         routing::send_from_config_path(Path::new(config_path), target, message, origin).await?;
 
-    println!(
-        "sent backend={:?} target={} status={:?} correlation_id={}",
-        receipt.backend, receipt.target, receipt.status, receipt.correlation_id
-    );
+    println!("{}", format_send_receipt(&receipt));
     Ok(())
+}
+
+fn format_send_receipt(receipt: &routing::SendReceipt) -> String {
+    format!(
+        "sent backend={:?} target={} transport_status={:?} completion=not_tracked correlation_id={}",
+        receipt.backend, receipt.target, receipt.status, receipt.correlation_id
+    )
 }
 
 async fn orchestrate(
@@ -838,6 +842,23 @@ tasks:
 
         assert_eq!(config.mcp_binary, "zellij-mcp");
         assert!(validate(&config).is_ok());
+    }
+
+    #[test]
+    fn send_receipt_output_distinguishes_completion() {
+        let receipt = routing::SendReceipt {
+            backend: routing::BackendKind::Claude,
+            target: "andy-coh".to_string(),
+            correlation_id: "corr-1".to_string(),
+            status: routing::SendStatus::Submitted,
+            session_id: None,
+            thread_id: None,
+        };
+
+        assert_eq!(
+            format_send_receipt(&receipt),
+            "sent backend=Claude target=andy-coh transport_status=Submitted completion=not_tracked correlation_id=corr-1"
+        );
     }
 
     #[test]
