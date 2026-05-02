@@ -484,8 +484,8 @@ async fn run_task(
     buckets: Arc<HashMap<String, Arc<TokenBucket>>>,
     base: PathBuf,
 ) -> TaskResult {
-    let started = Instant::now();
-    match run_task_inner(&task, config, client, buckets, base, started).await {
+    let scheduled = Instant::now();
+    match run_task_inner(&task, config, client, buckets, base).await {
         Ok(result) => result,
         Err(err) => TaskResult {
             status: "failed".into(),
@@ -493,7 +493,7 @@ async fn run_task(
             pane_id: "-".into(),
             output: String::new(),
             error: Some(err.to_string()),
-            elapsed: started.elapsed().as_secs_f64(),
+            elapsed: scheduled.elapsed().as_secs_f64(),
         },
     }
 }
@@ -504,7 +504,6 @@ async fn run_task_inner(
     client: Arc<McpClient>,
     buckets: Arc<HashMap<String, Arc<TokenBucket>>>,
     base: PathBuf,
-    started: Instant,
 ) -> Result<TaskResult> {
     let provider = config
         .providers
@@ -515,6 +514,7 @@ async fn run_task_inner(
         .context("missing token bucket")?
         .acquire()
         .await;
+    let started = Instant::now();
     let safe = safe_name(&task.name);
     let uuid = Uuid::new_v4().simple().to_string();
     let sentinel = format!("__METASTACK_DONE_{}_{}__", safe, &uuid[..8]);
@@ -580,19 +580,35 @@ async fn run_task_inner(
         }
         Ok::<(), anyhow::Error>(())
     };
-    let error = work.await.err().map(|e| e.to_string());
+    let work_error = work.await.err().map(|e| e.to_string());
+    let mut final_status = task_status_after_work(status, work_error.as_deref());
+    let elapsed = started.elapsed().as_secs_f64();
+    let mut error = work_error;
+    if error.is_none()
+        && final_status == "timeout"
+        && let Err(err) = kill_task_pane(&client, &config, &pane_id).await
+    {
+        final_status = task_status_after_timeout_cleanup(final_status, true);
+        error = Some(format!("timed out; failed to kill pane: {err}"));
+    }
     Ok(TaskResult {
-        status: if error.is_some() {
-            "failed".into()
-        } else {
-            status
-        },
+        status: final_status,
         provider: task.provider.clone(),
         pane_id,
         output,
         error,
-        elapsed: started.elapsed().as_secs_f64(),
+        elapsed,
     })
+}
+
+async fn kill_task_pane(client: &Arc<McpClient>, config: &Config, pane_id: &str) -> Result<()> {
+    let mut args = json!({"pane_id": pane_id});
+    add_opt(&mut args, "session", config.session.clone());
+    let result = timeout(Duration::from_secs(2), client.call_tool("kill-pane", args))
+        .await
+        .context("kill-pane timed out")??;
+    tool_data(&result)?;
+    Ok(())
 }
 
 async fn wait_for_spawned_panes(
@@ -856,6 +872,22 @@ fn has_unsuccessful_tasks(tasks: &[Task], results: &HashMap<String, TaskResult>)
             .get(&task.name)
             .is_none_or(|result| result.status != "done")
     })
+}
+
+fn task_status_after_work(status: String, work_error: Option<&str>) -> String {
+    if work_error.is_some() {
+        "failed".to_string()
+    } else {
+        status
+    }
+}
+
+fn task_status_after_timeout_cleanup(status: String, cleanup_failed: bool) -> String {
+    if status == "timeout" && cleanup_failed {
+        "failed".to_string()
+    } else {
+        status
+    }
 }
 
 fn default_direction() -> String {
@@ -1129,6 +1161,32 @@ tasks:
             &HashMap::from([("task".into(), failed)])
         ));
         assert!(has_unsuccessful_tasks(&config.tasks, &HashMap::new()));
+    }
+
+    #[test]
+    fn work_errors_take_failed_status_without_hiding_timeouts() {
+        assert_eq!(task_status_after_work("done".into(), None), "done");
+        assert_eq!(task_status_after_work("timeout".into(), None), "timeout");
+        assert_eq!(
+            task_status_after_work("timeout".into(), Some("read-pane timed out")),
+            "failed"
+        );
+    }
+
+    #[test]
+    fn timeout_cleanup_failure_marks_task_failed() {
+        assert_eq!(
+            task_status_after_timeout_cleanup("timeout".into(), true),
+            "failed"
+        );
+        assert_eq!(
+            task_status_after_timeout_cleanup("timeout".into(), false),
+            "timeout"
+        );
+        assert_eq!(
+            task_status_after_timeout_cleanup("done".into(), true),
+            "done"
+        );
     }
 
     fn send_args(parts: &[&str]) -> Vec<String> {

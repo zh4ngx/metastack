@@ -1,6 +1,6 @@
 [package]
 name = "metastack"
-version = "0.8.2"
+version = "0.8.3"
 edition = "2024"
 rust-version = "1.88"
 description = "Tiny DAG runner over zellij-mcp with a structured agent send prototype"

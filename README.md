@@ -74,8 +74,8 @@ nix profile install .
 With Nix from GitHub:
 
 ```bash
-nix run github:zh4ngx/metastack/v0.8.2 -- <args>
-nix profile install github:zh4ngx/metastack/v0.8.2
+nix run github:zh4ngx/metastack/v0.8.3 -- <args>
+nix profile install github:zh4ngx/metastack/v0.8.3
 ```
 
 Declarative NixOS/Home Manager users can add the flake package to
@@ -86,7 +86,7 @@ For a flake-based NixOS or Home Manager config, add the input:
 
 ```nix
 {
-  inputs.metastack.url = "github:zh4ngx/metastack/v0.8.2";
+  inputs.metastack.url = "github:zh4ngx/metastack/v0.8.3";
 }
 ```
 
@@ -115,7 +115,7 @@ For Home Manager:
 With Cargo:
 
 ```bash
-cargo install --git https://github.com/zh4ngx/metastack.git --tag v0.8.2 --locked
+cargo install --git https://github.com/zh4ngx/metastack.git --tag v0.8.3 --locked
 ```
 
 From a local checkout:
@@ -448,7 +448,9 @@ tasks:
 available.
 
 `startup_delay` must be finite and `>= 0`. `poll_interval` and `timeout` must
-be finite and `> 0`; invalid values fail during YAML parsing.
+be finite and `> 0`; invalid values fail during YAML parsing. The task timeout
+starts after provider rate-limit acquisition. If a spawned task reaches the
+timeout, `metastack` asks `zellij-mcp` to kill that pane before returning.
 
 `kill_on_done` is accepted for config compatibility, but it is currently
 ignored: post-DAG output draining replaced the old immediate pane kill path.

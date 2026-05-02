@@ -1,5 +1,12 @@
 # Changelog
 
+## v0.8.3 - 2026-05-02
+
+- Start each DAG task's timeout budget after provider rate-limit acquisition,
+  so queue wait does not consume the task run window.
+- Kill spawned zellij panes through `zellij-mcp` when DAG tasks time out,
+  preventing timed-out work from continuing after the run reports completion.
+
 ## v0.8.2 - 2026-05-02
 
 - Add GitHub Actions CI for pull requests, `main`, and `v*` tags.
