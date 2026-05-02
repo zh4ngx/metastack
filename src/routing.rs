@@ -1017,7 +1017,10 @@ where
                 if let Some(error) = value.get("error") {
                     bail!("JSON-RPC error for id {id}: {error}");
                 }
-                return Ok(value.get("result").cloned().unwrap_or(Value::Null));
+                return value
+                    .get("result")
+                    .cloned()
+                    .with_context(|| format!("malformed JSON-RPC response for id {id}"));
             }
             if value.get("id").is_none_or(Value::is_null)
                 && let Some(error) = value.get("error")
@@ -1817,6 +1820,25 @@ routes:
 
         assert!(error.contains("JSON-RPC error for id 3"));
         assert!(error.contains("boom"));
+    }
+
+    #[tokio::test]
+    async fn json_rpc_wait_rejects_matching_response_without_result_or_error() {
+        let mut stream = futures_util::stream::iter(vec![Ok(Message::Text(
+            json!({
+                "jsonrpc": "2.0",
+                "id": 3
+            })
+            .to_string()
+            .into(),
+        ))]);
+
+        let error = wait_for_response(&mut stream, 3, Duration::from_secs(1))
+            .await
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("malformed JSON-RPC response for id 3"));
     }
 
     #[test]
