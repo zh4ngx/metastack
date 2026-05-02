@@ -47,6 +47,13 @@
           };
 
           cargoToml = builtins.fromTOML (builtins.readFile ./Cargo.toml);
+          cargoLock = builtins.fromTOML (builtins.readFile ./Cargo.lock);
+          matchingLockPackages = builtins.filter (package: package.name == "metastack") cargoLock.package;
+          metastackLockPackage =
+            if matchingLockPackages == [ ] then
+              throw "Cargo.lock is missing the metastack package"
+            else
+              builtins.head matchingLockPackages;
         in
         {
           packages.default = rustPlatform.buildRustPackage {
@@ -59,7 +66,25 @@
           apps.default = {
             type = "app";
             program = "${self'.packages.default}/bin/metastack";
+            meta.description = "Run the metastack CLI";
           };
+
+          checks.default = self'.packages.default;
+
+          checks.version = pkgs.runCommand "metastack-version-check" { } ''
+            cargo_version='${cargoToml.package.version}'
+            lock_version='${metastackLockPackage.version}'
+            package_version='${self'.packages.default.version}'
+            if [ "$cargo_version" != "$lock_version" ]; then
+              echo "Cargo.toml version $cargo_version does not match Cargo.lock version $lock_version" >&2
+              exit 1
+            fi
+            if [ "$cargo_version" != "$package_version" ]; then
+              echo "Cargo.toml version $cargo_version does not match Nix package version $package_version" >&2
+              exit 1
+            fi
+            touch "$out"
+          '';
 
           devShells.default = pkgs.mkShell {
             packages = with pkgs; [

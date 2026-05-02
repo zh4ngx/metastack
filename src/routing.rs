@@ -162,7 +162,7 @@ impl BackendCapabilities {
             BackendKind::Claude => Self {
                 backend,
                 preserves_role: false,
-                has_delivery_receipt: true,
+                has_delivery_receipt: false,
                 is_lossy: false,
             },
             BackendKind::Zellij => Self {
@@ -524,19 +524,34 @@ impl OpenCodeBackend {
             .max_by_key(|session| session.updated_sort_key())
     }
 
-    async fn discover_session(&self, cwd: &str) -> Result<String> {
-        let sessions: Vec<OpenCodeSession> = self
-            .client
+    async fn list_sessions_for_cwd(&self, cwd: &str) -> Result<Vec<OpenCodeSession>> {
+        self.client
             .get(self.session_url())
             .query(&[("directory", cwd)])
             .send()
             .await?
             .error_for_status()?
             .json()
-            .await?;
+            .await
+            .context("failed to parse OpenCode session list")
+    }
+
+    async fn discover_session(&self, cwd: &str) -> Result<String> {
+        let sessions = self.list_sessions_for_cwd(cwd).await?;
         Self::select_session(&sessions, cwd)
             .map(|session| session.id.clone())
             .with_context(|| format!("no OpenCode session found for cwd {cwd}"))
+    }
+
+    async fn validate_session_id(&self, cwd: &str, session_id: &str) -> Result<()> {
+        let sessions = self.list_sessions_for_cwd(cwd).await?;
+        sessions
+            .iter()
+            .any(|session| session.id == session_id && session.directory.as_deref() == Some(cwd))
+            .then_some(())
+            .with_context(|| {
+                format!("configured OpenCode session_id {session_id} not found for cwd {cwd}")
+            })
     }
 }
 
@@ -548,15 +563,16 @@ impl SendBackend for OpenCodeBackend {
     fn send<'a>(&'a self, envelope: RoutingEnvelope) -> BoxFuture<'a, Result<SendReceipt>> {
         Box::pin(async move {
             ensure_user_message(&envelope)?;
+            let cwd = envelope
+                .cwd
+                .as_deref()
+                .context("OpenCode send requires cwd")?;
             let session_id = match envelope.session_id.clone() {
-                Some(session_id) => session_id,
-                None => {
-                    let cwd = envelope
-                        .cwd
-                        .as_deref()
-                        .context("OpenCode send requires cwd or session_id")?;
-                    self.discover_session(cwd).await?
+                Some(session_id) => {
+                    self.validate_session_id(cwd, &session_id).await?;
+                    session_id
                 }
+                None => self.discover_session(cwd).await?,
             };
 
             self.client
@@ -792,7 +808,7 @@ impl CodexBackend {
             "method": "thread/list",
             "params": {
                 "cwd": cwd,
-                "limit": 12,
+                "limit": 100,
                 "sortKey": "updated_at",
                 "sortDirection": "desc",
                 "archived": false,
@@ -857,13 +873,7 @@ impl CodexBackend {
     }
 
     fn select_thread_ref(value: &Value, cwd: Option<&str>) -> Option<CodexThreadRef> {
-        let threads = value
-            .get("data")
-            .or_else(|| value.get("threads"))
-            .or_else(|| value.get("result").and_then(|result| result.get("data")))
-            .or_else(|| value.get("result").and_then(|result| result.get("threads")))
-            .and_then(Value::as_array)
-            .or_else(|| value.get("result").and_then(Value::as_array))?;
+        let threads = Self::thread_items(value)?;
 
         let matching_threads = Self::threads_matching_cwd(threads.as_slice(), cwd);
         let newest_cli = matching_threads.iter().copied().find(|thread| {
@@ -878,15 +888,36 @@ impl CodexBackend {
                     .find(|thread| Self::thread_source_is_cli(thread))
             })
             .and_then(|thread| {
-                let id = thread
-                    .get("id")
-                    .or_else(|| thread.get("threadId"))
-                    .and_then(Value::as_str)?;
-                Some(CodexThreadRef {
-                    id: id.to_string(),
-                    status: Self::thread_status(thread).map(str::to_string),
-                })
+                let id = Self::thread_id(thread)?;
+                Some(Self::thread_ref(thread, id))
             })
+    }
+
+    fn select_thread_ref_by_id(
+        value: &Value,
+        cwd: Option<&str>,
+        thread_id: &str,
+    ) -> Option<CodexThreadRef> {
+        let cwd = cwd?;
+        let threads = Self::thread_items(value)?;
+        threads
+            .iter()
+            .find(|thread| {
+                Self::thread_id(thread) == Some(thread_id)
+                    && Self::thread_cwd(thread) == Some(cwd)
+                    && Self::thread_source_is_cli(thread)
+            })
+            .map(|thread| Self::thread_ref(thread, thread_id))
+    }
+
+    fn thread_items(value: &Value) -> Option<&Vec<Value>> {
+        value
+            .get("data")
+            .or_else(|| value.get("threads"))
+            .or_else(|| value.get("result").and_then(|result| result.get("data")))
+            .or_else(|| value.get("result").and_then(|result| result.get("threads")))
+            .and_then(Value::as_array)
+            .or_else(|| value.get("result").and_then(Value::as_array))
     }
 
     fn threads_matching_cwd<'a>(threads: &'a [Value], cwd: Option<&str>) -> Vec<&'a Value> {
@@ -914,6 +945,20 @@ impl CodexBackend {
             .get("cwd")
             .or_else(|| thread.get("directory"))
             .and_then(Value::as_str)
+    }
+
+    fn thread_id(thread: &Value) -> Option<&str> {
+        thread
+            .get("id")
+            .or_else(|| thread.get("threadId"))
+            .and_then(Value::as_str)
+    }
+
+    fn thread_ref(thread: &Value, id: &str) -> CodexThreadRef {
+        CodexThreadRef {
+            id: id.to_string(),
+            status: Self::thread_status(thread).map(str::to_string),
+        }
     }
 
     fn thread_source_is_cli(thread: &Value) -> bool {
@@ -959,20 +1004,18 @@ impl SendBackend for CodexBackend {
             ))
             .await?;
 
-            let thread = match envelope.thread_id.clone() {
-                Some(thread_id) => CodexThreadRef {
-                    id: thread_id,
-                    status: None,
-                },
-                None => {
-                    ws.send(Message::Text(
-                        Self::thread_list_request(2, cwd).to_string().into(),
-                    ))
-                    .await?;
-                    let response = wait_for_response(&mut ws, 2, self.transport_timeout).await?;
-                    Self::select_thread_ref(&response, Some(cwd))
-                        .with_context(|| format!("no Codex CLI thread found for cwd {cwd}"))?
-                }
+            ws.send(Message::Text(
+                Self::thread_list_request(2, cwd).to_string().into(),
+            ))
+            .await?;
+            let response = wait_for_response(&mut ws, 2, self.transport_timeout).await?;
+            let thread = if let Some(thread_id) = envelope.thread_id.clone() {
+                Self::select_thread_ref_by_id(&response, Some(cwd), &thread_id).with_context(
+                    || format!("configured Codex thread_id {thread_id} not found for cwd {cwd}"),
+                )?
+            } else {
+                Self::select_thread_ref(&response, Some(cwd))
+                    .with_context(|| format!("no Codex CLI thread found for cwd {cwd}"))?
             };
             let thread_id = thread.id;
 
@@ -1539,6 +1582,39 @@ routes:
     }
 
     #[tokio::test]
+    async fn opencode_backend_rejects_stale_explicit_session_id() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let request = read_http_request(&mut stream).await;
+            assert!(request.starts_with("GET /session?directory=%2Fhome%2Fandy%2Fnixos "));
+
+            let body = serde_json::to_string(&json!([
+                {
+                    "id": "ses-live",
+                    "directory": "/home/andy/nixos",
+                    "time": {"updated": 2}
+                }
+            ]))
+            .unwrap();
+            write_http_response(&mut stream, 200, Some(&body)).await;
+        });
+
+        let backend = OpenCodeBackend::new(format!("http://{addr}"));
+        let mut envelope = envelope();
+        envelope.backend = BackendKind::OpenCode;
+        envelope.target = "vault-oc".to_string();
+        envelope.cwd = Some("/home/andy/nixos".to_string());
+        envelope.session_id = Some("ses-stale".to_string());
+
+        let error = backend.send(envelope).await.unwrap_err().to_string();
+
+        assert!(error.contains("configured OpenCode session_id ses-stale not found"));
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
     async fn opencode_backend_times_out_when_session_endpoint_stalls() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -1586,6 +1662,7 @@ routes:
 
         let list = CodexBackend::thread_list_request(2, "/home/andy/nixos");
         assert_eq!(list["params"]["sourceKinds"], json!(["cli"]));
+        assert_eq!(list["params"]["limit"], 100);
 
         let resume = backend.thread_resume_request(3, "thread-1", "/home/andy/nixos");
         assert_eq!(resume["method"], "thread/resume");
@@ -1684,6 +1761,69 @@ routes:
         );
     }
 
+    #[test]
+    fn codex_explicit_thread_validation_requires_matching_cwd_and_cli_source() {
+        let response = json!({
+            "data": [
+                {
+                    "id": "wrong-cwd",
+                    "cwd": "/home/andy/other",
+                    "source": "cli",
+                    "status": {"type": "active"}
+                },
+                {
+                    "id": "right-id-api-source",
+                    "cwd": "/home/andy/nixos",
+                    "source": "api",
+                    "status": {"type": "active"}
+                },
+                {
+                    "id": "thread-1",
+                    "cwd": "/home/andy/nixos",
+                    "source": "cli",
+                    "status": {"type": "idle"}
+                }
+            ]
+        });
+
+        let selected =
+            CodexBackend::select_thread_ref_by_id(&response, Some("/home/andy/nixos"), "thread-1")
+                .unwrap();
+
+        assert_eq!(selected.id, "thread-1");
+        assert_eq!(selected.status.as_deref(), Some("idle"));
+        assert!(
+            CodexBackend::select_thread_ref_by_id(&response, Some("/home/andy/nixos"), "wrong-cwd")
+                .is_none()
+        );
+        assert!(
+            CodexBackend::select_thread_ref_by_id(
+                &response,
+                Some("/home/andy/nixos"),
+                "right-id-api-source"
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn codex_explicit_thread_validation_fails_closed_without_cwd_metadata() {
+        let response = json!({
+            "data": [
+                {
+                    "id": "thread-1",
+                    "source": "cli",
+                    "status": {"type": "active"}
+                }
+            ]
+        });
+
+        assert!(
+            CodexBackend::select_thread_ref_by_id(&response, Some("/home/andy/nixos"), "thread-1")
+                .is_none()
+        );
+    }
+
     #[tokio::test]
     async fn codex_backend_submits_turn_against_fake_server() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -1756,6 +1896,129 @@ routes:
         assert_eq!(receipt.backend, BackendKind::Codex);
         assert_eq!(receipt.status, SendStatus::Accepted);
         assert_eq!(receipt.thread_id.as_deref(), Some("thread-1"));
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn codex_backend_validates_explicit_thread_id_before_resume() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+
+            let request = next_ws_json(&mut ws).await.unwrap();
+            assert_eq!(request["method"], "initialize");
+            assert_eq!(request["id"], 1);
+            send_ws_json(&mut ws, json!({"jsonrpc": "2.0", "id": 1, "result": {}})).await;
+
+            let notification = next_ws_json(&mut ws).await.unwrap();
+            assert_eq!(notification["method"], "initialized");
+
+            let request = next_ws_json(&mut ws).await.unwrap();
+            assert_eq!(request["method"], "thread/list");
+            assert_eq!(request["id"], 2);
+            assert_eq!(request["params"]["cwd"], "/home/andy/nixos");
+            send_ws_json(
+                &mut ws,
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": 2,
+                    "result": {
+                        "data": [
+                            {
+                                "id": "thread-1",
+                                "cwd": "/home/andy/nixos",
+                                "source": "cli",
+                                "status": {"type": "idle"}
+                            }
+                        ]
+                    }
+                }),
+            )
+            .await;
+
+            let request = next_ws_json(&mut ws).await.unwrap();
+            assert_eq!(request["method"], "thread/resume");
+            assert_eq!(request["id"], 3);
+            assert_eq!(request["params"]["threadId"], "thread-1");
+            send_ws_json(&mut ws, json!({"jsonrpc": "2.0", "id": 3, "result": {}})).await;
+
+            let request = next_ws_json(&mut ws).await.unwrap();
+            assert_eq!(request["method"], "turn/start");
+            assert_eq!(request["id"], 4);
+            assert_eq!(request["params"]["threadId"], "thread-1");
+            send_ws_json(
+                &mut ws,
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": 4,
+                    "result": {
+                        "turn": {
+                            "id": "turn-1",
+                            "status": "inProgress"
+                        }
+                    }
+                }),
+            )
+            .await;
+        });
+
+        let backend = CodexBackend::new(format!("ws://{addr}"));
+        let mut envelope = envelope();
+        envelope.thread_id = Some("thread-1".to_string());
+        let receipt = backend.send(envelope).await.unwrap();
+
+        assert_eq!(receipt.status, SendStatus::Accepted);
+        assert_eq!(receipt.thread_id.as_deref(), Some("thread-1"));
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn codex_backend_rejects_explicit_thread_id_for_wrong_cwd() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+
+            let request = next_ws_json(&mut ws).await.unwrap();
+            assert_eq!(request["method"], "initialize");
+            send_ws_json(&mut ws, json!({"jsonrpc": "2.0", "id": 1, "result": {}})).await;
+
+            let notification = next_ws_json(&mut ws).await.unwrap();
+            assert_eq!(notification["method"], "initialized");
+
+            let request = next_ws_json(&mut ws).await.unwrap();
+            assert_eq!(request["method"], "thread/list");
+            assert_eq!(request["id"], 2);
+            assert_eq!(request["params"]["cwd"], "/home/andy/nixos");
+            send_ws_json(
+                &mut ws,
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": 2,
+                    "result": {
+                        "data": [
+                            {
+                                "id": "thread-stale",
+                                "cwd": "/home/andy/other",
+                                "source": "cli",
+                                "status": {"type": "active"}
+                            }
+                        ]
+                    }
+                }),
+            )
+            .await;
+        });
+
+        let backend = CodexBackend::new(format!("ws://{addr}"));
+        let mut envelope = envelope();
+        envelope.thread_id = Some("thread-stale".to_string());
+        let error = backend.send(envelope).await.unwrap_err().to_string();
+
+        assert!(error.contains("configured Codex thread_id thread-stale not found"));
         server.await.unwrap();
     }
 
@@ -1880,7 +2143,7 @@ routes:
 
         let claude = BackendCapabilities::for_kind(BackendKind::Claude);
         assert!(!claude.preserves_role);
-        assert!(claude.has_delivery_receipt);
+        assert!(!claude.has_delivery_receipt);
         assert!(!claude.is_lossy);
 
         let zellij = BackendCapabilities::for_kind(BackendKind::Zellij);

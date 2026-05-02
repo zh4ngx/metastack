@@ -1,9 +1,9 @@
 # MetaStack Architecture
 
-This document describes the v0.4/v1.0 direction for MetaStack structured
-routing and message sending. The v0.2 runtime remains a YAML-driven DAG runner
-over `zellij-mcp`; v0.3 added OpenCode/Codex routing, and v0.4 adds narrow
-Claude/Huddle submission.
+This document describes the current MetaStack structured-routing prototype and
+the direction toward service-mode routing. The original runtime remains a
+YAML-driven DAG runner over `zellij-mcp`; structured send now includes
+OpenCode, Codex, and narrow Claude/Huddle adapters.
 
 ## Current Runtime
 
@@ -18,8 +18,9 @@ metastack
   writes task artifacts
 ```
 
-This path is still useful and should remain portable. It is also the fallback
-for agents that are only reachable as terminal UIs.
+This path is still useful and should remain portable. It is separate from
+structured send; terminal fallback for `metastack send` is design-only and is
+not implemented yet.
 
 ## Target Runtime
 
@@ -41,8 +42,9 @@ finds:
 
 - `spawn(agent_spec)`: MetaStack owns lifecycle and structured sending from
   birth.
-- `send_running_lossy(target, message)`: MetaStack falls back to zellij keystrokes
-  for agents it did not spawn or cannot address structurally.
+- `send_running_lossy(target, message)`: future design-only primitive where
+  MetaStack could fall back to zellij keystrokes for agents it did not spawn or
+  cannot address structurally.
 
 ## Routing Model
 
@@ -54,10 +56,10 @@ The routing layer has four separate concepts:
 - `RouteEvent`: future backend-specific events routed by correlation id.
 
 Keeping these concepts separate matters because the backends have different
-lifecycle and delivery semantics. OpenCode can accept a prompt over HTTP.
-Codex can acknowledge `turn/start` over JSON-RPC. Huddle can report local CLI
-submission. Zellij can type text but cannot provide a structured receipt or
-preserve message roles.
+lifecycle and delivery semantics. OpenCode can accept a prompt over HTTP after
+session discovery or validation. Codex can acknowledge `turn/start` over
+JSON-RPC. Huddle can report local CLI submission. Zellij can type text but
+cannot provide a structured receipt or preserve message roles.
 
 ## Topology
 
@@ -134,8 +136,9 @@ The current prototype is narrower than the full envelope:
 - OpenCode, Codex, and Claude/Huddle are the implemented prototype adapters.
 - zellij fallback remains a design contract/stub until its addressing and reply
   semantics are precise.
-- Codex opens a WebSocket per prototype send and waits for the `turn/start`
-  JSON-RPC response. It does not wait for agent turn completion.
+- Codex opens a WebSocket per prototype send, validates configured thread ids
+  against target `cwd` metadata and CLI source, and waits for the
+  `turn/start` JSON-RPC response. It does not wait for agent turn completion.
 - Claude/Huddle shells out to `huddle send` and reports local submission only.
 - The prototype is intentionally fire-and-forget after backend submission or
   acceptance. Durable delivery, acknowledgements, retries, and async agent
@@ -148,9 +151,11 @@ The current prototype is narrower than the full envelope:
 | OpenCode | HTTP `prompt_async` | HTTP status | user prompt turn in prototype | `cwd -> session_id` |
 | Codex | JSON-RPC `turn/start` | JSON-RPC response | user prompt turn in prototype | `cwd -> active cli thread_id` |
 | Claude | `huddle sessions`, then `huddle send` CLI | process exit = submitted | user Huddle message in prototype | channel/member |
-| Zellij | keystrokes | none | not preserved | session/pane id |
+| Zellij | design-only keystrokes fallback | not implemented by `metastack send` | not preserved | session/pane id |
 
-Backends should report their capabilities before dispatch:
+Backends should report their capabilities before dispatch. In the current
+prototype, `has_delivery_receipt` means the backend reports more than local CLI
+submission:
 
 ```text
 preserves_role
@@ -170,9 +175,9 @@ explicit_lossy
 on_unavailable
 ```
 
-Codex `cx` sessions should not silently degrade to zellij. Zellij fallback is
-for raw or user-launched TUIs where the caller explicitly accepts lossy
-keystroke sending.
+Codex `cx` sessions should not silently degrade to zellij. Zellij fallback is a
+future design-only path for raw or user-launched TUIs where the caller
+explicitly accepts lossy keystroke sending.
 
 ## Route Events
 
@@ -192,8 +197,9 @@ timeout
 These are not the prototype `send` receipt. `send` only reports that the
 selected backend submitted or accepted the message. OpenCode reports
 `accepted`; Codex reports `accepted` after `turn/start`; Claude/Huddle reports
-`submitted` after local `huddle send` success; zellij can usually report only
-`submitted` or `degraded`.
+`submitted` after local `huddle send` success. Zellij structured-send fallback
+is not implemented by `metastack send`; if added later, it would likely report
+only `submitted` or `degraded`.
 
 Do not rebuild reliable message delivery in this layer. If MetaStack needs
 durable acks, retries, subscriptions, or long-running result streams, that
@@ -230,9 +236,10 @@ The request body is:
 Target discovery should pass `directory=<cwd>` to the session route, then
 prefer the newest top-level session whose `directory` matches the target project
 root. If only child sessions match, discovery can fall back to the newest child
-session; callers can always pin `session_id` explicitly. Delivery returns before
-the agent finishes; OpenCode does not provide completion readback through this
-primitive.
+session. Callers can pin `session_id` explicitly, but MetaStack still validates
+that configured id against the cwd-filtered session list before posting.
+Delivery returns before the agent finishes; OpenCode does not provide completion
+readback through this primitive.
 
 ### Codex
 
@@ -249,7 +256,7 @@ connect WebSocket
 initialize with experimentalApi
 send initialized notification
 thread/list filtered by cwd
-select active CLI thread
+select active CLI thread, or validate configured thread_id
 thread/resume to load the thread and attach this socket for events
 turn/start
 wait for the turn/start JSON-RPC response
@@ -258,7 +265,9 @@ wait for the turn/start JSON-RPC response
 Codex is not identical to fire-and-forget HTTP: MetaStack waits for the
 `turn/start` JSON-RPC response so it knows the app-server accepted the message.
 It intentionally does not keep the socket open for agent completion in the
-prototype.
+prototype. A configured `thread_id` still goes through `thread/list` first so
+MetaStack can reject ids that the app-server reports under a different cwd, with
+no cwd metadata, or from a non-CLI source.
 
 Codex input is an array of user input objects:
 
@@ -299,7 +308,7 @@ not infer it from a zellij session id such as `andy-coh`. `channel` is optional
 metadata/reserved routing context in the current CLI adapter; `huddle send`
 uses `member`.
 
-The v0.4 prototype shells out to:
+The current prototype shells out to:
 
 ```text
 huddle sessions
@@ -317,22 +326,25 @@ appended the message, not as completion verification. Bidirectional Channels MCP
 integration, reply correlation, and completion tracking are intentionally out
 of scope.
 
-### Zellij Fallback
+### Zellij Fallback (Design Only)
 
-Zellij remains an explicit lossy fallback option:
+Zellij remains an explicit lossy fallback design option, but it is not
+implemented by `metastack send`:
 
 ```text
 zellij-mcp send-text
 ```
 
-Use this for raw or user-launched TUIs where no structured backend is available.
-It is lossy: no typed roles, no delivery semantics, and no backend readback.
+If implemented later, use this only for raw or user-launched TUIs where no
+structured backend is available. It is lossy: no typed roles, no delivery
+semantics, and no backend readback.
 
 Codex interactive panes are especially fragile through keystrokes. Prefer the
 Codex app-server backend for `cx` sessions.
 
-This fallback remains a separate `send_running_lossy()` primitive, not a structured
-provider in the current prototype.
+This fallback remains a separate future `send_running_lossy()` primitive, not a
+structured provider in the current prototype. Today, zellij send config parses as
+a schema concept, but dispatch returns an explicit "not implemented" error.
 
 ## Config V2 Sketch
 
@@ -398,15 +410,20 @@ Live smoke tests should be opt-in because they depend on local services:
 - Huddle/coh channel availability and `huddle send` behavior.
 - zellij session and pane ids.
 
-## Migration Plan
+## Migration Status
+
+Implemented prototype steps:
 
 1. Add the routing data model and backend trait.
 2. Add OpenCode, Codex, and Claude/Huddle prototype backends.
 3. Add static target discovery from config v2.
 4. Add `metastack send` as a CLI path for one message.
-5. Add lifecycle-owned `spawn(agent_spec)` so MetaStack can create agents with
+
+Next design steps:
+
+1. Add lifecycle-owned `spawn(agent_spec)` so MetaStack can create agents with
    structured sending enabled from birth.
-6. Replace per-send Codex sockets with target-scoped connection managers
+2. Replace per-send Codex sockets with target-scoped connection managers
    and per-thread turn queues.
-7. Integrate routing into DAG tasks once target discovery is stable.
-8. Add Nix/Home Manager module support that renders config v2.
+3. Integrate routing into DAG tasks once target discovery is stable.
+4. Add Nix/Home Manager module support that renders config v2.

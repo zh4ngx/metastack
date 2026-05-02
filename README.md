@@ -39,7 +39,8 @@ merged to `main` with an explicit version bump and tag. Downstream declarative
 systems such as NixOS should consume tags or pinned revisions, not floating
 `main`. While `metastack` is pre-1.0, patch releases are for compatible bug
 fixes and minor releases are for new behavior or compatibility-affecting CLI or
-config changes.
+config changes. Before tagging, run `nix flake check`; it builds the package and
+checks that Cargo and Nix version metadata stay aligned.
 
 ## Vocabulary
 
@@ -64,8 +65,8 @@ nix profile install .
 With Nix from GitHub:
 
 ```bash
-nix run github:zh4ngx/metastack -- <args>
-nix profile install github:zh4ngx/metastack
+nix run github:zh4ngx/metastack/v0.5.2 -- <args>
+nix profile install github:zh4ngx/metastack/v0.5.2
 ```
 
 Declarative NixOS/Home Manager users can add the flake package to
@@ -75,7 +76,7 @@ Declarative NixOS/Home Manager users can add the flake package to
 With Cargo:
 
 ```bash
-cargo install --git https://github.com/zh4ngx/metastack.git --locked
+cargo install --git https://github.com/zh4ngx/metastack.git --tag v0.5.2 --locked
 ```
 
 From a local checkout:
@@ -273,10 +274,12 @@ agents:
     member: claude-member-name
 ```
 
-OpenCode returns after HTTP `prompt_async` acceptance. Codex returns after the
-app-server accepts `turn/start`. Production `cx` sessions are stateful
-WebSocket conversations with item, delta, and completion events; this prototype
-only submits one turn and waits for acceptance.
+OpenCode validates any configured `session_id` against the target `cwd`, then
+returns after HTTP `prompt_async` acceptance. Codex validates any configured
+`thread_id` against target `cwd` metadata and CLI source, then returns after the
+app-server accepts `turn/start`. Production `cx` sessions are stateful WebSocket
+conversations with item, delta, and completion events; this prototype only
+submits one turn and waits for acceptance.
 
 Claude/Huddle first checks `huddle sessions` for the configured `member`, then
 returns after the local `huddle send` command exits successfully. The receipt

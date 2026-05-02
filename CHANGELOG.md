@@ -1,5 +1,20 @@
 # Changelog
 
+## v0.5.2 - 2026-05-02
+
+- Add a `nix flake check` release guard that builds the package and checks Cargo
+  manifest, Cargo lockfile, and Nix package version metadata stay aligned.
+- Add flake app metadata so release checks do not warn on the default app.
+- Pin public GitHub install examples to release tags instead of floating `main`.
+- Clarify that zellij structured-send fallback remains design-only and is not
+  implemented by `metastack send`.
+- Validate configured OpenCode `session_id` values against the target `cwd`
+  before posting to `prompt_async`.
+- Validate configured Codex `thread_id` values against target `cwd` metadata and
+  CLI source before resuming and starting a turn.
+- Correct Claude/Huddle backend capabilities to report local submission only,
+  not delivery receipts.
+
 ## v0.5.1 - 2026-05-02
 
 - Derive Nix package and runtime client versions from Cargo package metadata to
