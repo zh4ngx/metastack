@@ -9,6 +9,8 @@ use tokio::process::Command;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 use uuid::Uuid;
 
+const METASTACK_VERSION: &str = env!("CARGO_PKG_VERSION");
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum BackendKind {
@@ -774,7 +776,7 @@ impl CodexBackend {
                 "clientInfo": {
                     "name": "metastack-codex-adapter",
                     "title": "metastack Codex adapter",
-                    "version": "0.5.0"
+                    "version": METASTACK_VERSION
                 },
                 "capabilities": {
                     "experimentalApi": true
@@ -1593,6 +1595,12 @@ routes:
 
         let notification = CodexBackend::initialized_notification();
         assert_eq!(notification["method"], "initialized");
+
+        let initialize = CodexBackend::initialize_request(1);
+        assert_eq!(
+            initialize["params"]["clientInfo"]["version"],
+            env!("CARGO_PKG_VERSION")
+        );
     }
 
     #[test]

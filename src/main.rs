@@ -191,6 +191,15 @@ struct TaskResult {
 }
 
 const SEND_USAGE: &str = "usage: metastack send [<routing-config.yaml>] <target> <message...>";
+const METASTACK_VERSION: &str = env!("CARGO_PKG_VERSION");
+
+fn mcp_initialize_request() -> Value {
+    json!({
+        "protocolVersion": "2024-11-05",
+        "capabilities": {},
+        "clientInfo": {"name": "metastack", "version": METASTACK_VERSION}
+    })
+}
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -224,13 +233,7 @@ async fn main() -> Result<()> {
 
     let (client, mut child) = McpClient::start(&config.mcp_binary).await?;
     client
-        .request(
-            "initialize",
-            json!({
-                "protocolVersion": "2024-11-05", "capabilities": {},
-                "clientInfo": {"name": "metastack", "version": "0.5.0"}
-            }),
-        )
+        .request("initialize", mcp_initialize_request())
         .await?;
     client
         .notify("notifications/initialized", json!({}))
@@ -1021,6 +1024,14 @@ tasks:
         );
         assert_eq!(target, file_name);
         assert_eq!(message, "status");
+    }
+
+    #[test]
+    fn mcp_initialize_request_uses_package_version() {
+        let request = mcp_initialize_request();
+
+        assert_eq!(request["clientInfo"]["name"], "metastack");
+        assert_eq!(request["clientInfo"]["version"], env!("CARGO_PKG_VERSION"));
     }
 
     #[test]

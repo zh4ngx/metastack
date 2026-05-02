@@ -45,11 +45,13 @@
             cargo = rustToolchain;
             rustc = rustToolchain;
           };
+
+          cargoToml = builtins.fromTOML (builtins.readFile ./Cargo.toml);
         in
         {
           packages.default = rustPlatform.buildRustPackage {
             pname = "metastack";
-            version = "0.5.0";
+            version = cargoToml.package.version;
             src = ./.;
             cargoLock.lockFile = ./Cargo.lock;
           };

@@ -1,5 +1,11 @@
 # Changelog
 
+## v0.5.1 - 2026-05-02
+
+- Derive Nix package and runtime client versions from Cargo package metadata to
+  prevent release-version drift.
+- Add tests covering MCP and Codex `clientInfo` version metadata.
+
 ## v0.5.0 - 2026-05-02
 
 - Add Claude/Huddle structured-send support through the `huddle send` CLI.
