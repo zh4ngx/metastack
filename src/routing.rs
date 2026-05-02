@@ -2857,14 +2857,17 @@ routes:
             let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
             let request = next_ws_json(&mut ws).await.unwrap();
             assert_eq!(request["method"], "initialize");
-            tokio::time::sleep(Duration::from_secs(5)).await;
+            std::future::pending::<()>().await;
         });
 
         let mut backend = CodexBackend::new(format!("ws://{addr}"));
-        backend.transport_timeout = Duration::from_millis(20);
+        backend.transport_timeout = Duration::from_millis(200);
         let error = backend.send(envelope()).await.unwrap_err().to_string();
 
-        assert!(error.contains("timed out waiting for JSON-RPC response id 1"));
+        assert!(
+            error.contains("timed out waiting for JSON-RPC response id 1"),
+            "{error}"
+        );
         server.abort();
     }
 

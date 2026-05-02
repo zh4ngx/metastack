@@ -74,48 +74,64 @@ nix profile install .
 With Nix from GitHub:
 
 ```bash
-nix run github:zh4ngx/metastack/v0.9.1 -- <args>
-nix profile install github:zh4ngx/metastack/v0.9.1
+nix run github:zh4ngx/metastack/v0.10.0 -- <args>
+nix profile install github:zh4ngx/metastack/v0.10.0
 ```
 
-Declarative NixOS/Home Manager users can add the flake package to
-`environment.systemPackages` or `home.packages`. There is no
-`programs.metastack` module yet.
+Declarative NixOS/Home Manager users can enable the exported
+`programs.metastack` modules. The NixOS module installs the package; the Home
+Manager module can also render the canonical routing config.
 
 For a flake-based NixOS or Home Manager config, add the input:
 
 ```nix
 {
-  inputs.metastack.url = "github:zh4ngx/metastack/v0.9.1";
+  inputs.metastack.url = "github:zh4ngx/metastack/v0.10.0";
 }
 ```
 
-Then install the package from a module that receives `inputs` and `pkgs`:
+The module snippets below assume the module can see `inputs`, for example via
+`specialArgs = { inherit inputs; };` in `nixpkgs.lib.nixosSystem` or
+`extraSpecialArgs = { inherit inputs; };` in Home Manager.
+
+The flake exports a NixOS module that installs the package:
 
 ```nix
-{ inputs, pkgs, ... }:
 {
-  environment.systemPackages = [
-    inputs.metastack.packages.${pkgs.system}.default
-  ];
+  imports = [ inputs.metastack.nixosModules.default ];
+
+  programs.metastack.enable = true;
 }
 ```
 
-For Home Manager:
+The Home Manager module installs the package and can render the canonical
+`~/.config/metastack/routing.yaml`:
 
 ```nix
-{ inputs, pkgs, ... }:
 {
-  home.packages = [
-    inputs.metastack.packages.${pkgs.system}.default
-  ];
+  imports = [ inputs.metastack.homeModules.default ];
+
+  programs.metastack = {
+    enable = true;
+    routingConfig = {
+      version = 2;
+      backends.codex = {
+        type = "codex";
+        url = "ws://127.0.0.1:4107";
+      };
+      agents.local-codex = {
+        backend = "codex";
+        cwd = "/path/to/project";
+      };
+    };
+  };
 }
 ```
 
 With Cargo:
 
 ```bash
-cargo install --git https://github.com/zh4ngx/metastack.git --tag v0.9.1 --locked
+cargo install --git https://github.com/zh4ngx/metastack.git --tag v0.10.0 --locked
 ```
 
 From a local checkout:
@@ -511,19 +527,25 @@ characters with `-`, capped at 40 characters. Config validation rejects task
 names that normalize to an empty artifact name or collide with another task's
 artifact name.
 
-## Declarative Nix Roadmap
+## Declarative Nix
 
 `metastack` currently reads YAML at runtime. That should remain the portable
 runtime interface.
 
-For NixOS and Home Manager users, the intended direction is to declare the same
-agent topology in Nix and materialize it to YAML before `metastack` starts:
+For NixOS and Home Manager users, the flake exports modules that install the
+binary and, for Home Manager, render structured-send routing config to
+`~/.config/metastack/routing.yaml` before `metastack` starts:
 
 ```text
-Nix module or flake output
-  declares providers, tasks, sessions, rate limits, secrets, and service policy
-  renders metastack YAML config
-  starts metastack as a systemd user service
+NixOS module
+  installs metastack package
+
+Home Manager module
+  installs metastack package
+  optionally renders routing.yaml from programs.metastack.routingConfig
+
+External NixOS/Home Manager definitions
+  manage backend services, secrets, and lifecycle
 
 metastack binary
   reads rendered YAML
@@ -531,9 +553,10 @@ metastack binary
   orchestrates the DAG
 ```
 
-The Rust binary should not evaluate Nix directly. Nix should own declaration,
-materialization, service lifecycle, rollback, and secret injection. `metastack`
-should stay a small portable runtime that consumes a rendered config file.
+The Rust binary does not evaluate Nix directly. Nix owns declaration,
+materialization, rollback, and secret injection. External NixOS/Home Manager
+service definitions should own service lifecycle for now. `metastack` stays a
+small portable runtime that consumes a rendered config file.
 
 YAML remains the fallback and lowest-level format. JSON is not currently a
 documented runtime config format.

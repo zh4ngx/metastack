@@ -1,5 +1,17 @@
 # Changelog
 
+## v0.10.0 - 2026-05-02
+
+- Add flake-exported NixOS and Home Manager modules under
+  `nixosModules.default` and `homeModules.default`.
+- The NixOS module installs `programs.metastack.package` when
+  `programs.metastack.enable = true`.
+- The Home Manager module installs the package and can declaratively render
+  `programs.metastack.routingConfig` to
+  `~/.config/metastack/routing.yaml`.
+- Add explicit changelog compatibility callouts to earlier releases that
+  changed public behavior.
+
 ## v0.9.1 - 2026-05-02
 
 - Add a Nix flake check that builds/tests the crate with the declared
@@ -46,6 +58,9 @@
 
 ## v0.8.0 - 2026-05-02
 
+- Compatibility: DAG YAML with unknown fields now fails validation instead of
+  being silently ignored, and completion sentinels must appear as strict
+  line-start tokens with only the exit code after the colon.
 - Reject unknown DAG config, provider, and task fields instead of silently
   ignoring typos such as `depends_on`.
 - Prevent post-DAG output draining from polling timed-out or failed panes
@@ -71,6 +86,9 @@
 
 ## v0.7.0 - 2026-05-02
 
+- Compatibility: structured-send stdout changed from `sent ...` to
+  `receipt ...` and routing YAML with unknown fields now fails validation
+  instead of being silently ignored.
 - Reject Claude/Huddle sends whose message text contains inline `@mention`
   tokens other than the configured target, preserving single-target routing.
 - Reject unknown routing config fields at the top level, in backend configs,
@@ -103,6 +121,9 @@
 
 ## v0.5.2 - 2026-05-02
 
+- Compatibility: explicit OpenCode `session_id` and Codex `thread_id` pins are
+  now validated against target `cwd` metadata before use; stale or mismatched
+  pins fail instead of sending to the wrong session.
 - Add a `nix flake check` release guard that builds the package and checks Cargo
   manifest, Cargo lockfile, and Nix package version metadata stay aligned.
 - Add flake app metadata so release checks do not warn on the default app.
@@ -124,6 +145,9 @@
 
 ## v0.5.0 - 2026-05-02
 
+- Compatibility: structured-send argument parsing changed so bare first
+  arguments are targets; extensionless routing config paths must contain `/`,
+  such as `./routing`.
 - Add Claude/Huddle structured-send support through the `huddle send` CLI.
 - Add default routing config discovery for `metastack send <target> <message...>`
   via `XDG_CONFIG_HOME`, falling back to `HOME`.

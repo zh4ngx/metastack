@@ -439,4 +439,4 @@ Next design steps:
 2. Replace per-send Codex sockets with target-scoped connection managers
    and per-thread turn queues.
 3. Integrate routing into DAG tasks once target discovery is stable.
-4. Add Nix/Home Manager module support that renders config v2.
+4. Add service lifecycle helpers on top of the Nix/Home Manager modules.

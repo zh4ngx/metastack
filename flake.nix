@@ -19,6 +19,11 @@
       ...
     }@inputs:
     flake-parts.lib.mkFlake { inherit inputs; } {
+      flake = {
+        nixosModules.default = import ./nix/modules/nixos.nix { inherit self; };
+        homeModules.default = import ./nix/modules/home-manager.nix { inherit self; };
+      };
+
       systems = [
         "x86_64-linux"
         "aarch64-linux"
@@ -146,6 +151,158 @@
             fi
             touch "$out"
           '';
+
+          checks.nixos-module =
+            let
+              overridePackage = pkgs.runCommand "metastack-nixos-module-override" { } ''
+                touch "$out"
+              '';
+              evalEnabled = pkgs.lib.evalModules {
+                specialArgs = { inherit pkgs; };
+                modules = [
+                  self.nixosModules.default
+                  (
+                    { lib, ... }:
+                    {
+                      options.environment.systemPackages = lib.mkOption {
+                        type = lib.types.listOf lib.types.package;
+                        default = [ ];
+                      };
+                      config.programs.metastack = {
+                        enable = true;
+                        package = overridePackage;
+                      };
+                    }
+                  )
+                ];
+              };
+              evalDisabled = pkgs.lib.evalModules {
+                specialArgs = { inherit pkgs; };
+                modules = [
+                  self.nixosModules.default
+                  (
+                    { lib, ... }:
+                    {
+                      options.environment.systemPackages = lib.mkOption {
+                        type = lib.types.listOf lib.types.package;
+                        default = [ ];
+                      };
+                    }
+                  )
+                ];
+              };
+              enabledPackages = evalEnabled.config.environment.systemPackages;
+              disabledPackages = evalDisabled.config.environment.systemPackages;
+              overrideMatches = builtins.head enabledPackages == overridePackage;
+            in
+            pkgs.runCommand "metastack-nixos-module-check" { } ''
+              package_count='${toString (builtins.length enabledPackages)}'
+              if [ "$package_count" != 1 ]; then
+                echo "expected NixOS module to install one package, got $package_count" >&2
+                exit 1
+              fi
+              if [ '${if overrideMatches then "yes" else "no"}' != yes ]; then
+                echo "expected NixOS module package override to be installed" >&2
+                exit 1
+              fi
+              disabled_package_count='${toString (builtins.length disabledPackages)}'
+              if [ "$disabled_package_count" != 0 ]; then
+                echo "expected disabled NixOS module to install no packages, got $disabled_package_count" >&2
+                exit 1
+              fi
+              touch "$out"
+            '';
+
+          checks.home-manager-module =
+            let
+              overridePackage = pkgs.runCommand "metastack-home-manager-module-override" { } ''
+                touch "$out"
+              '';
+              evalEnabled = pkgs.lib.evalModules {
+                specialArgs = { inherit pkgs; };
+                modules = [
+                  self.homeModules.default
+                  (
+                    { lib, ... }:
+                    {
+                      options.home.packages = lib.mkOption {
+                        type = lib.types.listOf lib.types.package;
+                        default = [ ];
+                      };
+                      options.xdg.configFile = lib.mkOption {
+                        type = lib.types.attrsOf lib.types.anything;
+                        default = { };
+                      };
+                      config.programs.metastack = {
+                        enable = true;
+                        package = overridePackage;
+                        routingConfig = {
+                          version = 2;
+                          backends.codex = {
+                            type = "codex";
+                            url = "ws://127.0.0.1:4107";
+                          };
+                          agents.local-codex = {
+                            backend = "codex";
+                            cwd = "/tmp/project";
+                          };
+                        };
+                      };
+                    }
+                  )
+                ];
+              };
+              evalDisabled = pkgs.lib.evalModules {
+                specialArgs = { inherit pkgs; };
+                modules = [
+                  self.homeModules.default
+                  (
+                    { lib, ... }:
+                    {
+                      options.home.packages = lib.mkOption {
+                        type = lib.types.listOf lib.types.package;
+                        default = [ ];
+                      };
+                      options.xdg.configFile = lib.mkOption {
+                        type = lib.types.attrsOf lib.types.anything;
+                        default = { };
+                      };
+                    }
+                  )
+                ];
+              };
+              enabledPackages = evalEnabled.config.home.packages;
+              disabledPackages = evalDisabled.config.home.packages;
+              disabledConfigFiles = evalDisabled.config.xdg.configFile;
+              routingSource = evalEnabled.config.xdg.configFile."metastack/routing.yaml".source;
+              overrideMatches = builtins.head enabledPackages == overridePackage;
+            in
+            pkgs.runCommand "metastack-home-manager-module-check" { } ''
+              package_count='${toString (builtins.length enabledPackages)}'
+              if [ "$package_count" != 1 ]; then
+                echo "expected Home Manager module to install one package, got $package_count" >&2
+                exit 1
+              fi
+              if [ '${if overrideMatches then "yes" else "no"}' != yes ]; then
+                echo "expected Home Manager module package override to be installed" >&2
+                exit 1
+              fi
+              if ! grep -q "local-codex" ${routingSource}; then
+                echo "expected Home Manager module to render routing config" >&2
+                exit 1
+              fi
+              disabled_package_count='${toString (builtins.length disabledPackages)}'
+              if [ "$disabled_package_count" != 0 ]; then
+                echo "expected disabled Home Manager module to install no packages, got $disabled_package_count" >&2
+                exit 1
+              fi
+              disabled_config_count='${toString (builtins.length (builtins.attrNames disabledConfigFiles))}'
+              if [ "$disabled_config_count" != 0 ]; then
+                echo "expected disabled Home Manager module to render no config files, got $disabled_config_count" >&2
+                exit 1
+              fi
+              touch "$out"
+            '';
 
           devShells.default = pkgs.mkShell {
             packages = with pkgs; [
