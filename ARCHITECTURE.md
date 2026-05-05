@@ -141,11 +141,12 @@ The current prototype is narrower than the full envelope:
   structured sends.
 - OpenCode and Codex implicit discovery fail closed when a target `cwd` matches
   multiple live candidate sessions or threads. Codex ignores stale `notLoaded`
-  thread records and considers only `active` or `idle` CLI threads. Pin
+  thread records and considers only `active` or `idle` routable Codex threads.
+  Today, routable means app-server threads with source `cli` or `vscode`. Pin
   `session_id` or `thread_id` for stable routing in shared project roots with
   multiple live candidates.
 - Codex opens a WebSocket per prototype send, validates configured thread ids
-  against target `cwd` metadata and CLI source, and waits for the
+  against target `cwd` metadata and routable app-server source, and waits for the
   `turn/start` JSON-RPC response. It does not wait for agent turn completion.
 - Claude/Huddle shells out to `huddle send` and reports local submission only.
 - The prototype is intentionally fire-and-forget after backend submission or
@@ -266,9 +267,9 @@ connect WebSocket
 initialize with experimentalApi
 send initialized notification
 thread/list filtered by cwd
-select exactly one active CLI thread
-else select exactly one idle CLI thread, ignoring notLoaded records
-or validate configured thread_id against cwd and CLI source
+select exactly one active routable thread
+else select exactly one idle routable thread, ignoring notLoaded records
+or validate configured thread_id against cwd and routable source
 thread/resume to load the thread and attach this socket for events
 turn/start
 wait for the turn/start JSON-RPC response
@@ -279,10 +280,11 @@ Codex is not identical to fire-and-forget HTTP: MetaStack waits for the
 It intentionally does not keep the socket open for agent completion in the
 prototype. A configured `thread_id` still goes through `thread/list` first so
 MetaStack can reject ids that the app-server reports under a different cwd, with
-no cwd metadata, or from a non-CLI source. Without a configured `thread_id`,
-implicit discovery prefers active CLI threads, then idle CLI threads, and
-ignores `notLoaded` records, but still requires exactly one candidate in the
-selected priority class; multiple live candidates fail closed.
+no cwd metadata, or from a non-routable source. Without a configured
+`thread_id`, implicit discovery prefers active routable threads, then idle
+routable threads, and ignores `notLoaded` records, but still requires exactly
+one candidate in the selected priority class; multiple live candidates fail
+closed.
 
 Codex input is an array of user input objects:
 

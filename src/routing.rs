@@ -979,7 +979,7 @@ impl CodexBackend {
                 "sortKey": "updated_at",
                 "sortDirection": "desc",
                 "archived": false,
-                "sourceKinds": ["cli"],
+                "sourceKinds": ["cli", "vscode"],
                 "useStateDbOnly": false
             }
         })
@@ -1051,25 +1051,27 @@ impl CodexBackend {
         };
 
         let matching_threads = Self::threads_matching_cwd(threads.as_slice(), cwd);
-        let active_cli = matching_threads
+        let active_routable = matching_threads
             .iter()
             .copied()
             .filter(|thread| {
-                Self::thread_source_is_cli(thread) && Self::thread_status(thread) == Some("active")
+                Self::thread_source_is_routable(thread)
+                    && Self::thread_status(thread) == Some("active")
             })
             .collect::<Vec<_>>();
-        if !active_cli.is_empty() {
-            return Self::unique_implicit_thread(active_cli, cwd);
+        if !active_routable.is_empty() {
+            return Self::unique_implicit_thread(active_routable, cwd);
         }
 
-        let idle_cli = matching_threads
+        let idle_routable = matching_threads
             .iter()
             .copied()
             .filter(|thread| {
-                Self::thread_source_is_cli(thread) && Self::thread_status(thread) == Some("idle")
+                Self::thread_source_is_routable(thread)
+                    && Self::thread_status(thread) == Some("idle")
             })
             .collect::<Vec<_>>();
-        Self::unique_implicit_thread(idle_cli, cwd)
+        Self::unique_implicit_thread(idle_routable, cwd)
     }
 
     fn unique_implicit_thread(
@@ -1079,15 +1081,17 @@ impl CodexBackend {
         match candidates.as_slice() {
             [] => Ok(None),
             [thread] => {
-                let id = Self::thread_id(thread).context("Codex CLI thread missing id")?;
+                let id = Self::thread_id(thread).context("Codex routable thread missing id")?;
                 Ok(Some(Self::thread_ref(thread, id)))
             }
             _ => match cwd {
                 Some(cwd) => bail!(
-                    "multiple live Codex CLI threads found for cwd {cwd}; configure thread_id explicitly"
+                    "multiple live Codex routable threads found for cwd {cwd}; configure thread_id explicitly"
                 ),
                 None => {
-                    bail!("multiple live Codex CLI threads found; configure thread_id explicitly")
+                    bail!(
+                        "multiple live Codex routable threads found; configure thread_id explicitly"
+                    )
                 }
             },
         }
@@ -1105,7 +1109,7 @@ impl CodexBackend {
             .find(|thread| {
                 Self::thread_id(thread) == Some(thread_id)
                     && Self::thread_cwd(thread) == Some(cwd)
-                    && Self::thread_source_is_cli(thread)
+                    && Self::thread_source_is_routable(thread)
             })
             .map(|thread| Self::thread_ref(thread, thread_id))
     }
@@ -1171,9 +1175,14 @@ impl CodexBackend {
         }
     }
 
-    fn thread_source_is_cli(thread: &Value) -> bool {
-        thread.get("source").and_then(Value::as_str) == Some("cli")
-            || thread.get("sourceKind").and_then(Value::as_str) == Some("cli")
+    fn thread_source_is_routable(thread: &Value) -> bool {
+        matches!(
+            thread.get("source").and_then(Value::as_str),
+            Some("cli" | "vscode")
+        ) || matches!(
+            thread.get("sourceKind").and_then(Value::as_str),
+            Some("cli" | "vscode")
+        )
     }
 
     fn thread_status(thread: &Value) -> Option<&str> {
@@ -1226,7 +1235,7 @@ impl SendBackend for CodexBackend {
                 )?
             } else {
                 Self::select_thread_ref(&response, Some(cwd))?
-                    .with_context(|| format!("no Codex CLI thread found for cwd {cwd}"))?
+                    .with_context(|| format!("no Codex routable thread found for cwd {cwd}"))?
             };
             let thread_id = thread.id;
 
@@ -2238,7 +2247,7 @@ routes:
         assert_eq!(request["params"]["input"][0]["text_elements"], json!([]));
 
         let list = CodexBackend::thread_list_request(2, "/home/andy/nixos");
-        assert_eq!(list["params"]["sourceKinds"], json!(["cli"]));
+        assert_eq!(list["params"]["sourceKinds"], json!(["cli", "vscode"]));
         assert_eq!(list["params"]["limit"], 100);
 
         let resume = backend.thread_resume_request(3, "thread-1", "/home/andy/nixos");
@@ -2342,7 +2351,7 @@ routes:
             .unwrap_err()
             .to_string();
 
-        assert!(error.contains("multiple live Codex CLI threads"));
+        assert!(error.contains("multiple live Codex routable threads"));
         assert!(error.contains("thread_id"));
     }
 
@@ -2369,7 +2378,7 @@ routes:
             .unwrap_err()
             .to_string();
 
-        assert!(error.contains("multiple live Codex CLI threads"));
+        assert!(error.contains("multiple live Codex routable threads"));
         assert!(error.contains("thread_id"));
     }
 
@@ -2397,6 +2406,27 @@ routes:
             .unwrap();
 
         assert_eq!(selected.id, "active-cli");
+    }
+
+    #[test]
+    fn codex_thread_selection_accepts_vscode_remote_thread() {
+        let response = json!({
+            "data": [
+                {
+                    "id": "sutro-thread",
+                    "cwd": "/home/andy/sutro",
+                    "source": "vscode",
+                    "status": {"type": "idle"}
+                }
+            ]
+        });
+
+        let selected = CodexBackend::select_thread_ref(&response, Some("/home/andy/sutro"))
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(selected.id, "sutro-thread");
+        assert_eq!(selected.status.as_deref(), Some("idle"));
     }
 
     #[test]
@@ -2496,7 +2526,7 @@ routes:
     }
 
     #[test]
-    fn codex_explicit_thread_validation_requires_matching_cwd_and_cli_source() {
+    fn codex_explicit_thread_validation_requires_matching_cwd_and_routable_source() {
         let response = json!({
             "data": [
                 {
@@ -2510,6 +2540,12 @@ routes:
                     "cwd": "/home/andy/nixos",
                     "source": "api",
                     "status": {"type": "active"}
+                },
+                {
+                    "id": "vscode-thread",
+                    "cwd": "/home/andy/nixos",
+                    "source": "vscode",
+                    "status": {"type": "idle"}
                 },
                 {
                     "id": "thread-1",
@@ -2526,6 +2562,16 @@ routes:
 
         assert_eq!(selected.id, "thread-1");
         assert_eq!(selected.status.as_deref(), Some("idle"));
+        assert_eq!(
+            CodexBackend::select_thread_ref_by_id(
+                &response,
+                Some("/home/andy/nixos"),
+                "vscode-thread"
+            )
+            .unwrap()
+            .id,
+            "vscode-thread"
+        );
         assert!(
             CodexBackend::select_thread_ref_by_id(&response, Some("/home/andy/nixos"), "wrong-cwd")
                 .is_none()
@@ -2829,7 +2875,7 @@ routes:
         let backend = CodexBackend::new(format!("ws://{addr}"));
         let error = backend.send(envelope()).await.unwrap_err().to_string();
 
-        assert!(error.contains("multiple live Codex CLI threads"));
+        assert!(error.contains("multiple live Codex routable threads"));
         assert!(error.contains("thread_id"));
         server.await.unwrap();
     }

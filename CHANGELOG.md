@@ -1,5 +1,11 @@
 # Changelog
 
+## v0.10.3 - 2026-05-05
+
+- Treat Codex app-server threads with source `vscode` as routable alongside
+  `cli`, so `cx --remote` sessions that persist as VS Code-sourced threads can
+  be discovered or validated by `metastack send`.
+
 ## v0.10.2 - 2026-05-02
 
 - Clarify that zellij is supported only for DAG task execution in the current
