@@ -30,6 +30,7 @@ in
             backend = "codex";
             cwd = "/path/to/project";
           };
+          aliases.main = "local-codex";
         }
       '';
       description = ''

@@ -1,5 +1,12 @@
 # Changelog
 
+## v0.11.0 - 2026-05-05
+
+- Add structured-send routing aliases for the `main` and `observer` roles.
+  Routing config v2 may now define `aliases` that map those role names to
+  existing agent targets. `metastack send` resolves aliases before literal
+  target fallback, so existing literal target sends remain valid.
+
 ## v0.10.3 - 2026-05-05
 
 - Treat Codex app-server threads with source `vscode` as routable alongside

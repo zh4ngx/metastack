@@ -397,6 +397,10 @@ backends:
     type: claude
     command: huddle
 
+aliases:
+  main: nixos-cx
+  observer: andy-coh
+
 agents:
   nixos-cx:
     backend: codex
@@ -411,8 +415,12 @@ agents:
 
 The original task DAG config remains a separate YAML shape. Routing config v2 is
 the current parallel schema for structured send; it does not replace DAG config.
-Reply routing, route paths, and lossy terminal fallback are follow-up contracts,
-not part of the minimal runnable example.
+`aliases` is optional and intentionally narrow: only `main` and `observer` are
+accepted role names. Alias values must point directly at existing `agents`
+entries; alias-to-alias indirection is rejected. `metastack send` resolves an
+alias before falling back to a literal target name, so existing literal sends
+continue to work. Reply routing, route paths, and lossy terminal fallback are
+follow-up contracts, not part of the minimal runnable example.
 
 ## Testing Strategy
 

@@ -78,8 +78,8 @@ nix profile install .
 With Nix from GitHub:
 
 ```bash
-nix run github:zh4ngx/metastack/v0.10.3 -- <args>
-nix profile install github:zh4ngx/metastack/v0.10.3
+nix run github:zh4ngx/metastack/v0.11.0 -- <args>
+nix profile install github:zh4ngx/metastack/v0.11.0
 ```
 
 Declarative NixOS/Home Manager users can enable the exported
@@ -90,7 +90,7 @@ For a flake-based NixOS or Home Manager config, add the input:
 
 ```nix
 {
-  inputs.metastack.url = "github:zh4ngx/metastack/v0.10.3";
+  inputs.metastack.url = "github:zh4ngx/metastack/v0.11.0";
 }
 ```
 
@@ -135,7 +135,7 @@ The Home Manager module installs the package and can render the canonical
 With Cargo:
 
 ```bash
-cargo install --git https://github.com/zh4ngx/metastack.git --tag v0.10.3 --locked
+cargo install --git https://github.com/zh4ngx/metastack.git --tag v0.11.0 --locked
 ```
 
 From a local checkout:
@@ -341,6 +341,10 @@ backends:
     type: claude
     command: huddle
 
+aliases:
+  main: local-codex
+  observer: local-claude
+
 agents:
   local-opencode:
     backend: opencode
@@ -354,6 +358,12 @@ agents:
     backend: huddle
     member: claude-member-name
 ```
+
+The optional `aliases` section maps stable role names to physical agent targets.
+Currently only `main` and `observer` are accepted. Alias values must name
+existing `agents` entries directly; alias-to-alias indirection is rejected.
+`metastack send main "..."` resolves through `aliases.main` first, while
+literal sends such as `metastack send local-codex "..."` continue to work.
 
 OpenCode validates any configured `session_id` against the target `cwd`. Without
 a configured `session_id`, implicit discovery requires exactly one matching

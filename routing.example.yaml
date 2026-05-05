@@ -22,6 +22,11 @@ backends:
   huddle:
     type: claude
     command: huddle
+
+aliases:
+  main: nixos-cx
+  observer: andy-coh
+
 agents:
   vault-oc:
     backend: opencode

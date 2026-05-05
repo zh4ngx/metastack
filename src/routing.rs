@@ -208,6 +208,8 @@ pub trait SendBackend: Send + Sync {
 pub struct RoutingConfig {
     pub version: u8,
     #[serde(default)]
+    pub aliases: HashMap<String, String>,
+    #[serde(default)]
     pub backends: HashMap<String, BackendConfig>,
     #[serde(default)]
     pub agents: HashMap<String, AgentSpec>,
@@ -232,6 +234,21 @@ impl RoutingConfig {
                 bail!("routing backend name cannot be empty");
             }
             backend.validate(name)?;
+        }
+
+        for (role, target) in &self.aliases {
+            if !is_supported_alias_role(role) {
+                bail!("routing alias {role} is not supported; supported aliases: main, observer");
+            }
+            if target.trim().is_empty() {
+                bail!("routing alias {role} cannot point to a blank target");
+            }
+            if self.aliases.contains_key(target) {
+                bail!("routing alias {role} cannot point to alias {target}");
+            }
+            if !self.agents.contains_key(target) {
+                bail!("routing alias {role} references unknown target {target}");
+            }
         }
 
         for (name, agent) in &self.agents {
@@ -301,6 +318,10 @@ impl RoutingConfig {
 
         Ok(())
     }
+}
+
+fn is_supported_alias_role(role: &str) -> bool {
+    matches!(role, "main" | "observer")
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
@@ -448,52 +469,57 @@ impl TargetRegistry {
     }
 
     pub fn resolve(&self, target: &str) -> Result<ResolvedTarget> {
+        let resolved_name = self
+            .config
+            .aliases
+            .get(target)
+            .map(String::as_str)
+            .unwrap_or(target);
         let agent = self
             .config
             .agents
-            .get(target)
+            .get(resolved_name)
             .with_context(|| format!("unknown routing target {target}"))?;
         let backend = self.config.backends.get(&agent.backend).with_context(|| {
             format!(
-                "target {target} references unknown backend {}",
+                "target {resolved_name} references unknown backend {}",
                 agent.backend
             )
         })?;
 
-        let handle = match backend {
-            BackendConfig::OpenCode { .. } => TargetHandle::OpenCode {
-                cwd: agent
-                    .cwd
-                    .clone()
-                    .with_context(|| format!("routing target {target} must define cwd"))?,
-                session_id: agent.session_id.clone(),
-            },
-            BackendConfig::Codex { .. } => TargetHandle::Codex {
-                cwd: agent
-                    .cwd
-                    .clone()
-                    .with_context(|| format!("routing target {target} must define cwd"))?,
-                thread_id: agent.thread_id.clone(),
-            },
-            BackendConfig::Claude { channel, .. } => TargetHandle::Claude {
-                channel: channel.clone(),
-                member: agent
-                    .member
-                    .as_deref()
-                    .map(ClaudeBackend::normalize_member)
-                    .with_context(|| {
-                        format!("routing target {target} must define Huddle member")
+        let handle =
+            match backend {
+                BackendConfig::OpenCode { .. } => TargetHandle::OpenCode {
+                    cwd: agent.cwd.clone().with_context(|| {
+                        format!("routing target {resolved_name} must define cwd")
                     })?,
-            },
-            BackendConfig::Zellij { session, .. } => TargetHandle::Zellij {
-                session: session.clone(),
-                pane_id: None,
-                submit_strategy: ZellijSubmitStrategy::default(),
-            },
-        };
+                    session_id: agent.session_id.clone(),
+                },
+                BackendConfig::Codex { .. } => TargetHandle::Codex {
+                    cwd: agent.cwd.clone().with_context(|| {
+                        format!("routing target {resolved_name} must define cwd")
+                    })?,
+                    thread_id: agent.thread_id.clone(),
+                },
+                BackendConfig::Claude { channel, .. } => TargetHandle::Claude {
+                    channel: channel.clone(),
+                    member: agent
+                        .member
+                        .as_deref()
+                        .map(ClaudeBackend::normalize_member)
+                        .with_context(|| {
+                            format!("routing target {resolved_name} must define Huddle member")
+                        })?,
+                },
+                BackendConfig::Zellij { session, .. } => TargetHandle::Zellij {
+                    session: session.clone(),
+                    pane_id: None,
+                    submit_strategy: ZellijSubmitStrategy::default(),
+                },
+            };
 
         Ok(ResolvedTarget {
-            name: target.to_string(),
+            name: resolved_name.to_string(),
             backend_name: agent.backend.clone(),
             backend: backend.clone(),
             handle,
@@ -527,7 +553,7 @@ impl Router {
         let resolved = TargetRegistry::new(self.config.clone()).resolve(target)?;
         let mut envelope = RoutingEnvelope {
             origin,
-            target: target.to_string(),
+            target: resolved.name.clone(),
             backend: resolved.backend.kind(),
             role: MessageRole::User,
             message,
@@ -1509,6 +1535,132 @@ agents:
                 thread_id: Some("thread-1".to_string())
             }
         );
+    }
+
+    #[test]
+    fn target_registry_resolves_supported_aliases_before_literal_targets() {
+        let router = Router::from_yaml(
+            r#"
+version: 2
+aliases:
+  main: nixos-cx
+  observer: andy-coh
+backends:
+  cx:
+    type: codex
+    url: ws://127.0.0.1:4107
+  huddle:
+    type: claude
+agents:
+  main:
+    backend: huddle
+    member: wrong-literal-target
+  nixos-cx:
+    backend: cx
+    cwd: /home/andy/nixos
+  andy-coh:
+    backend: huddle
+    member: andy
+"#,
+        )
+        .unwrap();
+
+        let (envelope, backend) = router
+            .envelope_for("main", "status".to_string(), "andy".to_string())
+            .unwrap();
+
+        assert_eq!(backend.kind(), BackendKind::Codex);
+        assert_eq!(envelope.target, "nixos-cx");
+        assert_eq!(envelope.cwd.as_deref(), Some("/home/andy/nixos"));
+
+        let (observer_envelope, observer_backend) = router
+            .envelope_for("observer", "status".to_string(), "andy".to_string())
+            .unwrap();
+
+        assert_eq!(observer_backend.kind(), BackendKind::Claude);
+        assert_eq!(observer_envelope.target, "andy-coh");
+        assert_eq!(observer_envelope.member.as_deref(), Some("andy"));
+    }
+
+    #[test]
+    fn literal_targets_still_resolve_when_no_alias_matches() {
+        let router = Router::from_yaml(
+            r#"
+version: 2
+aliases:
+  main: andy-cx
+backends:
+  cx:
+    type: codex
+    url: ws://127.0.0.1:4107
+agents:
+  andy-cx:
+    backend: cx
+    cwd: /home/andy
+  nixos-cx:
+    backend: cx
+    cwd: /home/andy/nixos
+"#,
+        )
+        .unwrap();
+
+        let (envelope, backend) = router
+            .envelope_for("nixos-cx", "status".to_string(), "andy".to_string())
+            .unwrap();
+
+        assert_eq!(backend.kind(), BackendKind::Codex);
+        assert_eq!(envelope.target, "nixos-cx");
+        assert_eq!(envelope.cwd.as_deref(), Some("/home/andy/nixos"));
+    }
+
+    #[test]
+    fn validates_alias_roles_and_targets() {
+        let unsupported_role = r#"
+version: 2
+aliases:
+  reviewer: andy-coh
+backends:
+  huddle:
+    type: claude
+agents:
+  andy-coh:
+    backend: huddle
+    member: andy
+"#;
+        let error = Router::from_yaml(unsupported_role).unwrap_err().to_string();
+        assert!(error.contains("supported aliases: main, observer"));
+
+        let unknown_target = r#"
+version: 2
+aliases:
+  observer: missing-target
+backends:
+  huddle:
+    type: claude
+agents:
+  andy-coh:
+    backend: huddle
+    member: andy
+"#;
+        let error = Router::from_yaml(unknown_target).unwrap_err().to_string();
+        assert!(error.contains("references unknown target missing-target"));
+
+        let alias_to_alias = r#"
+version: 2
+aliases:
+  main: andy-cx
+  observer: main
+backends:
+  cx:
+    type: codex
+    url: ws://127.0.0.1:4107
+agents:
+  andy-cx:
+    backend: cx
+    cwd: /home/andy
+"#;
+        let error = Router::from_yaml(alias_to_alias).unwrap_err().to_string();
+        assert!(error.contains("cannot point to alias main"));
     }
 
     #[test]
